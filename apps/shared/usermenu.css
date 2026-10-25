@@ -1,0 +1,70 @@
+/* Menú de cuenta / cerrar sesión (admin y portal) */
+.um { position: relative; display: flex; align-items: center; gap: 6px; min-width: 0; }
+.um-trigger {
+  display: flex; align-items: center; gap: 10px; min-width: 0; cursor: pointer; text-align: left; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line-2); border-radius: 12px; padding: 5px 10px 5px 5px;
+  transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
+}
+.um-trigger:hover, .um-trigger.open { background: var(--surface-2); border-color: rgba(91, 140, 255, 0.45); }
+.um-trigger.open { box-shadow: 0 0 0 3px var(--accent-soft); }
+.um-trigger:focus-visible, .um-quick:focus-visible, .um-out:focus-visible { outline: 2px solid var(--accent-bright); outline-offset: 2px; }
+.um-av {
+  width: 30px; height: 30px; flex: none; border-radius: 9px; display: grid; place-items: center; color: #fff;
+  font: 700 13px var(--display); background: var(--grad); box-shadow: 0 6px 16px -8px var(--accent);
+}
+.um-av-lg { width: 40px; height: 40px; border-radius: 12px; font-size: 16px; }
+.um-id { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+.um-name { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.um-mail { font: 500 10.5px var(--mono); color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.um-chev { color: var(--faint); display: flex; transition: transform 0.2s; margin-left: 2px; }
+.um-trigger.open .um-chev { transform: rotate(180deg); color: var(--ink); }
+.um-chip .um-id { max-width: 190px; }
+
+/* Variante tarjeta (pie del menú lateral del portal) */
+.um-card { width: 100%; }
+.um-card .um-trigger { flex: 1; padding: 7px 8px 7px 7px; }
+.um-card .um-chev { transform: rotate(180deg); }
+.um-card .um-trigger.open .um-chev { transform: rotate(0); }
+.um-quick {
+  width: 42px; align-self: stretch; flex: none; display: grid; place-items: center; cursor: pointer; border-radius: 12px;
+  color: var(--muted); background: var(--surface); border: 1px solid var(--line-2); transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+.um-quick:hover { color: var(--danger); background: var(--danger-soft); border-color: rgba(248, 113, 113, 0.4); }
+
+/* Solo avatar (celular) */
+.um-icon .um-trigger { padding: 4px; border-radius: 12px; }
+.um-icon .um-av { width: 32px; height: 32px; }
+
+/* Menú desplegable */
+.um-menu {
+  position: fixed; z-index: 1000; padding: 8px; border-radius: 16px; background: var(--surface-solid);
+  border: 1px solid var(--line-2); box-shadow: 0 24px 60px -16px rgb(var(--sh) / 0.7), 0 0 0 1px rgb(var(--fg) / 0.02) inset;
+  animation: um-in 0.16s ease-out;
+}
+@keyframes um-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: none; } }
+.um-head { display: flex; gap: 12px; align-items: center; padding: 10px 10px 14px; border-bottom: 1px solid var(--line); margin-bottom: 8px; }
+.um-head .um-name { font-size: 14px; }
+.um-head .um-mail { font-size: 11px; }
+.um-role {
+  align-self: flex-start; margin-top: 6px; font: 500 9.5px var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--accent-ink); background: var(--accent-soft); border: 1px solid rgba(91, 140, 255, 0.25); padding: 2px 7px; border-radius: 99px;
+}
+.um-out {
+  width: 100%; display: flex; align-items: center; gap: 11px; padding: 10px; border-radius: 11px; cursor: pointer; text-align: left;
+  font: 600 13.5px var(--font); color: var(--danger); background: transparent; border: 1px solid transparent; transition: background 0.15s, border-color 0.15s;
+}
+.um-out:hover, .um-out:focus-visible { background: var(--danger-soft); border-color: rgba(248, 113, 113, 0.25); }
+.um-out:disabled { opacity: 0.6; cursor: progress; }
+.um-out-ic { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--danger-soft); flex: none; }
+.um-out kbd { font: 500 10px var(--mono); color: var(--faint); border: 1px solid var(--line-2); border-radius: 5px; padding: 1px 5px; }
+@media (hover: none) { .um-out kbd { display: none; } }
+@media (max-width: 900px) {
+  .um-out { padding: 13px 10px; font-size: 15px; }
+}
+.um-item {
+  width: 100%; display: flex; align-items: center; gap: 11px; padding: 10px; margin-bottom: 4px; border-radius: 11px; cursor: pointer; text-align: left;
+  font: 600 13.5px var(--font); color: var(--ink); background: transparent; border: 1px solid transparent; transition: background 0.15s;
+}
+.um-item:hover, .um-item:focus-visible { background: var(--surface-2); }
+.um-item-ic { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent-bright); flex: none; }
+@media (max-width: 900px) { .um-item { padding: 13px 10px; font-size: 15px; } }

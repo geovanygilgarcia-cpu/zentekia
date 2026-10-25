@@ -1,0 +1,47 @@
+# Zentekia Chat · Worker único (widget, portal de clientes, panel admin y API)
+name = "agente-zentekia"
+main = "src/index.ts"
+compatibility_date = "2025-06-01"
+
+# Cuenta de Cloudflare donde está zentekia.com (lerikg10)
+account_id = "2dbaf67c6576975767e67cb4d4f844b0"
+
+# Dominios: deploy los crea solo
+routes = [
+  { pattern = "app.zentekia.com", custom_domain = true },
+  { pattern = "chat.zentekia.com", custom_domain = true },
+  { pattern = "*.zentekia.com/*", zone_name = "zentekia.com" }
+]
+
+# Qwen alojado por Zentekia + embeddings + conversión de PDF/DOCX
+[ai]
+binding = "AI"
+
+# Base de datos en la cuenta de tu amigo (créala con: npx wrangler d1 create agente-db)
+[[d1_databases]]
+binding = "DB"
+database_name = "agente-db"
+database_id = "ce9f1b04-5495-4fe2-8b25-107818336e17"
+
+# Base de conocimiento. Créalo una vez con:
+#   npx wrangler vectorize create zentekia-kb --dimensions=1024 --metric=cosine
+#   npx wrangler vectorize create-metadata-index zentekia-kb --property-name=agent_id --type=string
+[[vectorize]]
+binding = "VECTORIZE"
+index_name = "zentekia-kb"
+
+# [[r2_buckets]]
+# binding = "FILES"
+# bucket_name = "zentekia-archivos"
+
+[triggers]
+crons = ["*/10 * * * *"]
+
+[vars]
+BASE_DOMAIN = "zentekia.com"
+TOTP_OBLIGATORIO = "true"
+
+# Secretos:
+#   npx wrangler secret put ADMIN_PASSWORD
+#   npx wrangler secret put MASTER_KEY       (el MISMO valor que en tu cuenta)
+#   npx wrangler secret put RESEND_API_KEY   (opcional)

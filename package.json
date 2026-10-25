@@ -1,0 +1,26 @@
+{
+  "name": "zentekia-chat",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build:apps": "node scripts/build-apps.mjs && node scripts/assets-to-worker.mjs",
+    "build": "npm run build:apps && node scripts/bundle-worker.mjs",
+    "dev": "npm run build:apps && wrangler dev --config worker/wrangler.toml",
+    "deploy": "npm run build:apps && wrangler deploy --config worker/wrangler.toml",
+    "typecheck": "tsc -p worker/tsconfig.json",
+    "test": "node --test tests/plataforma.test.mjs"
+  },
+  "dependencies": {
+    "@elevenlabs/client": "^1.30.0",
+    "preact": "^10.24.3",
+    "qrcode-generator": "^1.4.4",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260702.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.40.0"
+  }
+}

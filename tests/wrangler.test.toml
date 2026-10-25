@@ -1,0 +1,17 @@
+# Config SOLO para pruebas locales (sin Workers AI ni Vectorize: modelos simulados)
+name = "zentekia-chat-test"
+main = "../worker/src/index.ts"
+compatibility_date = "2025-06-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "zc-test"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[vars]
+BASE_DOMAIN = ""
+TOTP_OBLIGATORIO = "true"
+DEV_FAKE_AI = "true"
+ADMIN_EMAIL = "erik@zentekia.com"
+ADMIN_PASSWORD = "clave-de-prueba-123"
+MASTER_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="

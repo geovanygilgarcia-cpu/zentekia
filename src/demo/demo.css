@@ -1,0 +1,108 @@
+/* Página de demo que aloja el widget.
+   Concepto: hoja de trabajo sobria a la izquierda; el widget vive en la esquina como en cualquier sitio real. */
+:root {
+  --dm-bg: #f6f7fb;
+  --dm-card: #ffffff;
+  --dm-line: #dfe3ec;
+  --dm-text: #121826;
+  --dm-dim: #586178;
+  --dm-accent: #2f6bff;
+  --dm-done: #19a065;
+  --dm-font: 'IBM Plex Sans', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --dm-display: 'Instrument Serif', Georgia, serif;
+  --dm-mono: 'IBM Plex Mono', ui-monospace, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --dm-bg: #0c0f15; --dm-card: #141922; --dm-line: #262d3b; --dm-text: #eef1f7; --dm-dim: #9aa3b6; --dm-accent: #6e9bff; --dm-done: #3ccf8e;
+    color-scheme: dark;
+  }
+}
+:root[data-theme='dark'] {
+  --dm-bg: #0c0f15; --dm-card: #141922; --dm-line: #262d3b; --dm-text: #eef1f7; --dm-dim: #9aa3b6; --dm-accent: #6e9bff; --dm-done: #3ccf8e;
+  color-scheme: dark;
+}
+html, body { margin: 0; background: var(--dm-bg); }
+.dm { min-height: 100vh; background: var(--dm-bg); color: var(--dm-text); font-family: var(--dm-font); font-size: 15px; line-height: 1.6; }
+.dm *, .dm *::before, .dm *::after { box-sizing: border-box; }
+.dm-wrap {
+  max-width: 560px; padding-block: 56px 120px; padding-inline: 20px; margin-left: max(20px, 8vw);
+  display: flex; flex-direction: column; gap: 28px;
+}
+@media (max-width: 1000px) { .dm-wrap { margin: 0 auto; } }
+@media (min-width: 901px) and (max-width: 1000px) { .dm-wrap { margin-left: 20px; max-width: calc(100vw - 460px); } }
+
+.dm-eyebrow { margin: 0; font-family: var(--dm-mono); font-size: 11.5px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--dm-accent); }
+.dm h1 { margin: 6px 0 12px; font-weight: 600; font-size: clamp(34px, 6vw, 48px); line-height: 1.02; letter-spacing: -0.03em; text-wrap: balance; }
+.dm h1 em { font-family: var(--dm-display); font-weight: 400; font-style: italic; letter-spacing: 0; color: var(--dm-accent); }
+.dm-lede { margin: 0; color: var(--dm-dim); max-width: 52ch; }
+.dm h2 { margin: 0 0 14px; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--dm-dim); }
+
+.dm-card { background: var(--dm-card); border: 1px solid var(--dm-line); border-radius: 18px; padding: 22px; display: flex; flex-direction: column; gap: 18px; }
+.dm-card h2 { margin: 0; }
+.dm-field { display: flex; flex-direction: column; gap: 7px; }
+.dm-field label, .dm-label { font-size: 13px; font-weight: 600; }
+.dm-field input {
+  font: inherit; color: var(--dm-text); background: var(--dm-bg); border: 1px solid var(--dm-line);
+  border-radius: 10px; padding: 10px 12px; outline: none; min-width: 0;
+}
+.dm-field input:focus { border-color: var(--dm-accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--dm-accent) 20%, transparent); }
+.dm-hint { margin: 0; font-size: 13px; color: var(--dm-dim); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dm-pill { font-family: var(--dm-mono); font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--dm-line); color: var(--dm-dim); }
+.dm-pill.is-live { color: var(--dm-done); border-color: currentColor; }
+
+.dm-swatches { display: flex; gap: 10px; flex-wrap: wrap; }
+.dm-swatch {
+  width: 34px; height: 34px; border-radius: 50%; border: 0; cursor: pointer;
+  background: var(--sw); box-shadow: 0 0 0 1px var(--dm-line);
+  transition: transform 0.15s;
+}
+.dm-swatch:hover { transform: scale(1.08); }
+.dm-swatch[aria-checked='true'] { box-shadow: 0 0 0 3px var(--dm-card), 0 0 0 5px var(--sw); }
+.dm-swatch:focus-visible { outline: 2px solid var(--dm-accent); outline-offset: 4px; }
+
+.dm-flow ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.dm-flow li {
+  position: relative; padding: 0 0 18px 26px; display: grid; gap: 1px;
+  border-left: 2px dashed var(--dm-line); margin-left: 6px;
+}
+.dm-flow li:last-child { border-left-color: transparent; padding-bottom: 0; }
+.dm-flow li::before {
+  content: ''; position: absolute; left: -8px; top: 4px; width: 14px; height: 14px; border-radius: 50%;
+  background: var(--dm-bg); border: 2px solid var(--dm-line);
+}
+.dm-flow li.is-done { border-left-style: solid; border-left-color: var(--dm-done); }
+.dm-flow li.is-done::before { background: var(--dm-done); border-color: var(--dm-done); }
+.dm-flow strong { font-size: 15px; }
+.dm-flow span { color: var(--dm-dim); font-size: 14px; }
+.dm-flow small { font-family: var(--dm-mono); font-size: 11px; color: var(--dm-dim); }
+.dm-flow li.is-done small { color: var(--dm-done); }
+
+.dm-agents { display: flex; flex-wrap: wrap; gap: 8px; }
+.dm-agent {
+  font: inherit; font-size: 13.5px; font-weight: 500; cursor: pointer;
+  padding: 7px 12px; border-radius: 999px; border: 1px solid var(--dm-line); background: var(--dm-bg); color: var(--dm-text);
+}
+.dm-agent:hover { border-color: var(--dm-accent); }
+.dm-agent[aria-checked='true'] { background: var(--dm-accent); border-color: var(--dm-accent); color: var(--dm-card); }
+.dm-agent:focus-visible { outline: 2px solid var(--dm-accent); outline-offset: 2px; }
+.dm code { font-family: var(--dm-mono); font-size: 12px; }
+
+/* ---------- login y barra de sesión ---------- */
+.dm-login { display: grid; place-items: center; padding: 24px 16px; }
+.dm-login-card { width: 100%; max-width: 380px; gap: 16px; }
+.dm .dm-login-title { margin: 6px 0 8px; font-size: 34px; }
+.dm-error { margin: 0; padding: 8px 12px; border-radius: 10px; font-size: 13.5px; color: #b42318; background: color-mix(in srgb, #d92d20 10%, transparent); }
+.dm-btn {
+  font: inherit; font-weight: 600; cursor: pointer; padding: 11px 16px; border-radius: 10px; border: 0;
+  background: var(--dm-accent); color: #fff;
+}
+.dm-btn:disabled { opacity: 0.5; cursor: default; }
+.dm-btn:focus-visible, .dm-link:focus-visible { outline: 2px solid var(--dm-accent); outline-offset: 2px; }
+.dm-topbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.dm-user { display: inline-flex; align-items: center; gap: 10px; font-size: 13px; color: var(--dm-dim); }
+.dm-link { font: inherit; font-size: 13px; font-weight: 600; background: none; border: 0; padding: 0; cursor: pointer; color: var(--dm-accent); }
+.dm-link:hover { text-decoration: underline; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme='light']) .dm-error { color: #ff8a80; } }
+:root[data-theme='dark'] .dm-error { color: #ff8a80; }
+.dm-login-card .dm-hint { display: block; }

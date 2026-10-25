@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-apps
+.wrangler
+.dev.vars
+tests/.state
+tests/.*.log
+
+# Datos privados: NUNCA al repo (es público)
+respaldo.sql
+respaldo.toml
+crear-admin.sql
+*.sql
+
+# Se generan solos con "npm run build" / "npm run deploy"
+worker/src/assets.ts
+worker/worker-un-archivo.js

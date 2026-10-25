@@ -1,0 +1,6 @@
+html, body, #root { margin: 0; height: 100%; background: transparent; }
+#root { position: relative; }
+body { overflow: hidden; }
+.zt-loading { height: 100%; background: #fff; }
+.zt-fatal { padding: 24px; font: 14px/1.4 system-ui, sans-serif; color: #475569; background: #fff; height: 100%; box-sizing: border-box; }
+.zt-captcha { position: absolute; left: 0; right: 0; bottom: 64px; display: flex; justify-content: center; }
