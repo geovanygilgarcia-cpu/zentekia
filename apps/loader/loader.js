@@ -1,6 +1,7 @@
 /*
   Zentekia · loader (widget.js): una sola línea para chat, voz o ambos
-  <script src="https://chat.zentekia.com/widget.js" data-key="pk_live_xxx" async></script>
+  <script src="https://chat.zentekia.com/widget.js" data-key="pk_live_xxx" data-chat="true" data-voice="true" async></script>
+  data-chat / data-voice (opcionales) apagan un canal en esa página: "false", "0", "no" u "off".
   Crea la burbuja (en Shadow DOM, sin chocar con los estilos del sitio) y el iframe solo cuando se abre.
 */
 ;(function () {
@@ -12,11 +13,27 @@
   var KEY = script.getAttribute('data-key') || src.searchParams.get('key')
   if (!KEY) return
 
+  // Atributo data-<name> (o ?name= en la URL del script): null si no viene, false si dice false/0/no/off
+  function flag(name) {
+    var v = script.getAttribute('data-' + name)
+    if (v == null) v = src.searchParams.get(name)
+    if (v == null || v === '') return null
+    v = String(v).trim().toLowerCase()
+    return !(v === 'false' || v === '0' || v === 'no' || v === 'off')
+  }
+  var WANT_CHAT = flag('chat')
+  var WANT_VOICE = flag('voice')
+
   function start(cfg) {
     if (!cfg || cfg.suspended) return
-    // Canales: chat (texto), voz o ambos. Si el asistente es solo de voz, la burbuja es un teléfono.
-    if (cfg.chat === false && !cfg.voice) return
-    var VOICE_ONLY = cfg.chat === false && !!cfg.voice
+    // Canales: chat (texto), voz o ambos. El sitio puede apagar uno con data-chat / data-voice.
+    // Si queda solo voz, la burbuja es un teléfono.
+    var CHAT = cfg.chat !== false && WANT_CHAT !== false
+    var VOICE = !!cfg.voice && WANT_VOICE !== false
+    if (!CHAT && !VOICE) return
+    var VOICE_ONLY = !CHAT && VOICE
+    // El iframe recibe los canales apagados para no mostrarlos
+    var CH_PARAMS = (CHAT ? '' : '&chat=false') + (VOICE ? '' : '&voice=false')
     var t = cfg.theme || {}
     var size = t.button_size || 56
     var side = t.position === 'left' ? 'left' : 'right'
@@ -87,9 +104,9 @@
       open = v
       if (v && !frame) {
         frame = document.createElement('iframe')
-        frame.src = ORIGIN + '/w/frame?key=' + encodeURIComponent(KEY)
+        frame.src = ORIGIN + '/w/frame?key=' + encodeURIComponent(KEY) + CH_PARAMS
         frame.title = t.header_title || t.assistant_name || 'Chat'
-        frame.allow = 'clipboard-write; microphone; autoplay'
+        frame.allow = VOICE ? 'clipboard-write; microphone; autoplay' : 'clipboard-write'
         frame.setAttribute('referrerpolicy', 'origin')
         panel.appendChild(frame)
       }

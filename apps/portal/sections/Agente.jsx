@@ -28,8 +28,6 @@ export function AgentForm({ api, agentId, readOnly, compact, onSaved }) {
           business_name: f.business_name || '',
           business_description: f.business_description || '',
           show_sources: Boolean(f.show_sources),
-          auto_end: Boolean(f.auto_end),
-          end_when: f.end_when || '',
           temperature: Number(f.temperature),
         }),
       'Agente guardado',
@@ -73,26 +71,14 @@ export function AgentForm({ api, agentId, readOnly, compact, onSaved }) {
               <Field label="Instrucciones" hint="Explica en tus palabras qué hace tu negocio, qué debe responder el agente y qué no. Ej.: «Somos una clínica dental en Monterrey. Agenda citas de lunes a sábado…».">
                 <textarea rows={compact ? 7 : 12} value={f.system_prompt} onInput={set('system_prompt')} maxLength={20000} />
               </Field>
-              <div class={'endtool' + (f.auto_end ? ' on' : '')}>
-                <label class="endtool-head">
-                  <span class="endtool-ic" aria-hidden="true">
-                    <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M9.5 16.6 4.9 12l-1.4 1.4 6 6L21 7.9l-1.4-1.4z" /></svg>
-                  </span>
-                  <span class="grow">
-                    <b>El agente puede finalizar la conversación</b>
-                    <span class="small muted">Cuando se cumpla la condición, se despide, cierra el chat y le pide al visitante calificar la atención.</span>
-                  </span>
-                  <span class="switch">
-                    <input type="checkbox" role="switch" checked={Boolean(f.auto_end)} onChange={set('auto_end')} aria-label="El agente puede finalizar la conversación" />
-                    <i aria-hidden="true" />
-                  </span>
-                </label>
-                {f.auto_end && (
-                  <Field label="¿Cuándo debe finalizar?" hint="Escríbelo como se lo dirías a una persona. Si lo dejas vacío, cierra cuando tenga lo que necesita o el visitante se despida.">
-                    <textarea rows="3" value={f.end_when || ''} onInput={set('end_when')} maxLength={1000} placeholder="Ej.: Cuando ya tengas nombre completo, teléfono, correo y el servicio que le interesa, confírmale los datos y finaliza." />
-                  </Field>
-                )}
-              </div>
+              <a class="tool-hint" href={`#/a/${agentId}/herramientas`}>
+                <span class="endtool-ic" aria-hidden="true">⚙</span>
+                <span class="grow small">
+                  <b>Herramientas</b>
+                  <span class="muted"> · Finalizar conversación, prospectos, pasar a una persona, citas, WhatsApp y webhook se configuran aparte.</span>
+                </span>
+                <span aria-hidden="true">→</span>
+              </a>
               <Field label="Si no sabe la respuesta, dirá…" hint="Respuesta de respaldo cuando la información no está en tus instrucciones ni en tu base de conocimiento.">
                 <input value={f.fallback_response || ''} onInput={set('fallback_response')} maxLength={400} placeholder="No tengo esa información. ¿Quieres que te ponga en contacto con una persona del equipo?" />
               </Field>

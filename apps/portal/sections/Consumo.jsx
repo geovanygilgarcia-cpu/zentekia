@@ -58,10 +58,28 @@ function roundTop(x, y, w, h, r) {
   return `M${x},${y + h}V${y + r}Q${x},${y} ${x + r},${y}H${x + w - r}Q${x + w},${y} ${x + w},${y + r}V${y + h}Z`
 }
 
-function Calculator({ prices, avg, current }) {
+function Calculator({ prices, avg, current, rates, replies }) {
   const [convs, setConvs] = useState(1000)
   const [model, setModel] = useState(current || prices[0]?.id)
   const p = prices.find((x) => x.id === model) || prices[0]
+  // Cliente con cobro por mensaje: se calcula con las respuestas promedio por conversación
+  if (rates?.message_micro != null) {
+    const cost = Math.ceil(convs * replies.replies * rates.message_micro)
+    return (
+      <div class="card">
+        <div class="card-title">Calculadora</div>
+        <div class="row" style="margin-top:12px;font-size:14px">
+          Con
+          <input class="in" type="number" min="0" step="100" value={convs} onInput={(e) => setConvs(Number(e.target.value) || 0)} style="width:110px;margin-top:0" aria-label="Conversaciones al mes" />
+          conversaciones de chat al mes pagarías aproximadamente <b style="font-size:18px">{usd(cost, 2)}</b> al mes.
+        </div>
+        <div class="small muted" style="margin-top:8px">
+          Calculado con {num(replies.replies)} respuestas del asistente por conversación
+          {replies.sample ? ` (promedio de tus últimas ${num(replies.sample)} conversaciones)` : ' (valor típico; se ajusta con tu uso real)'} a {usd(rates.message_micro)} cada una, sin contar excedentes de tokens. Las llamadas de voz se cobran aparte, por minuto.
+        </div>
+      </div>
+    )
+  }
   if (!p) return null
   const cost = Math.ceil((convs * (avg.tokens_in * p.in_per_1m_micro + avg.tokens_out * p.out_per_1m_micro)) / 1e6)
   return (
@@ -97,7 +115,14 @@ export default function Consumo({ api }) {
   const openStmt = async (p) => setStmt(await api.get(`statements/${p}`))
   return (
     <>
-      <PageHead title="Consumo y costos" sub="Todo se mide en tokens. Aquí ves cuánto llevas, cuánto vas a pagar y a qué tarifa.">
+      <PageHead
+        title="Consumo y costos"
+        sub={
+          data.rates?.message_micro != null
+            ? 'El chat se cobra por mensaje y la voz por minuto. Aquí ves cuánto llevas, cuánto vas a pagar y los tokens que usaste.'
+            : 'Aquí ves cuánto llevas, cuánto vas a pagar y a qué tarifa.'
+        }
+      >
         <input type="month" class="in" style="width:auto;margin-top:0" value={period} max={thisMonth} onInput={(e) => e.target.value && setPeriod(e.target.value)} aria-label="Mes" />
       </PageHead>
       <div class="kpis">
@@ -155,14 +180,29 @@ export default function Consumo({ api }) {
             ) : (
               <div class="tbl-wrap">
                 <table class="tbl">
-                  <thead><tr><th>Modelo</th><th class="num">Mensajes</th><th class="num">Entrada</th><th class="num">Salida</th><th class="num">Importe</th></tr></thead>
+                  <thead><tr><th>Modelo</th><th class="num">Cobrado por</th><th class="num">Entrada</th><th class="num">Salida</th><th class="num">Importe</th></tr></thead>
                   <tbody>
                     {data.by_model.map((b) => (
                       <tr key={b.model_id}>
-                        <td>{b.name}{b.model_type === 'byok' && <div class="small muted">fee de plataforma</div>}{b.model_type === 'voice' && <div class="small muted">cobro por minuto · Mensajes = llamadas</div>}</td>
-                        <td class="num">{num(b.n)}</td>
-                        <td class="num">{num(b.tin)}</td>
-                        <td class="num">{num(b.tout)}</td>
+                        <td>
+                          {b.name}
+                          {b.model_type === 'byok' && !b.billed_messages && <div class="small muted">fee de plataforma</div>}
+                          {b.model_type === 'voice' && <div class="small muted">{num(b.n)} {b.n === 1 ? 'llamada' : 'llamadas'}</div>}
+                        </td>
+                        <td class="num">
+                          {b.model_type === 'voice' ? (
+                            `${num(Math.round(((b.voice_secs || 0) / 60) * 10) / 10)} min`
+                          ) : b.billed_messages ? (
+                            <>
+                              {num(b.billed_messages)} mensajes
+                              {b.overage > 0 && <div class="small muted">+ excedente {usd(b.overage)}</div>}
+                            </>
+                          ) : (
+                            'tokens'
+                          )}
+                        </td>
+                        <td class="num">{b.model_type === 'voice' ? '—' : num(b.tin)}</td>
+                        <td class="num">{b.model_type === 'voice' ? '—' : num(b.tout)}</td>
                         <td class="num">{usd(b.cost)}</td>
                       </tr>
                     ))}
@@ -171,11 +211,13 @@ export default function Consumo({ api }) {
               </div>
             )}
           </div>
-          <Calculator prices={data.prices} avg={data.avg_per_conversation} current={data.current_model} />
+          <Calculator prices={data.prices} avg={data.avg_per_conversation} current={data.current_model} rates={data.rates} replies={data.avg_replies} />
         </div>
         <div class="col-side">
+          {data.rates && <RatesCard rates={data.rates} />}
+          {(data.rates?.message_micro == null || data.rates?.included_in != null || data.rates?.included_out != null) && (
           <div class="card">
-            <div class="card-title">Tarifas por 1M tokens</div>
+            <div class="card-title">{data.rates?.message_micro == null ? 'Tarifas por 1M tokens' : 'Tarifa del excedente (por 1M tokens)'}</div>
             <table class="tbl" style="margin-top:6px">
               <thead><tr><th>Modelo</th><th class="num">Entrada</th><th class="num">Salida</th></tr></thead>
               <tbody>
@@ -190,6 +232,7 @@ export default function Consumo({ api }) {
             </table>
             <div class="small muted" style="margin-top:8px">Precios en USD. Con tu propia API key tu proveedor te cobra aparte.</div>
           </div>
+          )}
           <div class="card">
             <div class="card-title">Estados de cuenta</div>
             {data.statements.length === 0 ? (
@@ -219,6 +262,43 @@ export default function Consumo({ api }) {
   )
 }
 
+/** Tarifa del cliente: por mensaje (chat) y por minuto (voz) */
+function RatesCard({ rates }) {
+  const perMsg = rates.message_micro != null
+  const hasIncluded = rates.included_in != null || rates.included_out != null
+  return (
+    <div class="card">
+      <div class="card-title">Tu tarifa</div>
+      <table class="tbl" style="margin-top:6px">
+        <tbody>
+          <tr>
+            <td>Chat</td>
+            <td class="num">{perMsg ? <><b>{usd(rates.message_micro)}</b> por mensaje</> : 'por tokens (abajo)'}</td>
+          </tr>
+          {perMsg && hasIncluded && (
+            <tr>
+              <td>Incluido por mensaje</td>
+              <td class="num">
+                {rates.included_in != null ? `${num(rates.included_in)} tokens de entrada` : 'entrada sin límite'}
+                <div>{rates.included_out != null ? `${num(rates.included_out)} tokens de salida` : 'salida sin límite'}</div>
+              </td>
+            </tr>
+          )}
+          <tr>
+            <td>Llamadas de voz</td>
+            <td class="num"><b>{usd(rates.minute_micro)}</b> por minuto</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="small muted" style="margin-top:8px">
+        {perMsg ? 'Cada respuesta del asistente cuenta como un mensaje. Los resúmenes de prospectos van incluidos. ' : ''}
+        {perMsg && hasIncluded ? 'Si una respuesta usa más tokens de los incluidos, el excedente se cobra a la tarifa por token (abajo). ' : ''}
+        La voz se cobra por segundo, proporcional al minuto. Precios en USD. Los tokens se siguen mostrando como referencia de uso.
+      </div>
+    </div>
+  )
+}
+
 function StatementModal({ s, onClose }) {
   const st = s.statement
   return (
@@ -231,14 +311,25 @@ function StatementModal({ s, onClose }) {
         </div>
         <div class="small muted" style="margin-top:4px">{s.tenant.name} · Zentekia</div>
         <table class="tbl" style="margin-top:14px">
-          <thead><tr><th>Modelo</th><th class="num">Entrada</th><th class="num">Salida</th><th class="num">Tarifa (1M)</th><th class="num">Importe</th></tr></thead>
+          <thead><tr><th>Concepto</th><th class="num">Entrada</th><th class="num">Salida</th><th class="num">Cobrado por</th><th class="num">Importe</th></tr></thead>
           <tbody>
             {st.lines.map((l, i) => (
               <tr key={i}>
-                <td>{l.model}{l.type === 'byok' && <div class="small muted">fee de plataforma</div>}</td>
-                <td class="num">{num(l.tokens_in)}</td>
-                <td class="num">{num(l.tokens_out)}</td>
-                <td class="num small">{perM(l.in_per_1m_micro)} / {perM(l.out_per_1m_micro)}</td>
+                <td>{l.model}{l.type === 'byok' && !l.billed_messages && <div class="small muted">fee de plataforma</div>}</td>
+                <td class="num">{l.type === 'voice' ? '—' : num(l.tokens_in)}</td>
+                <td class="num">{l.type === 'voice' ? '—' : num(l.tokens_out)}</td>
+                <td class="num small">
+                  {l.type === 'voice' ? (
+                    `${num(Math.round(((l.voice_secs || 0) / 60) * 10) / 10)} min`
+                  ) : l.billed_messages ? (
+                    <>
+                      {num(l.billed_messages)} mensajes
+                      {l.overage_micro > 0 && <div>+ excedente {usd(l.overage_micro)}</div>}
+                    </>
+                  ) : (
+                    `${perM(l.in_per_1m_micro)} / ${perM(l.out_per_1m_micro)} por 1M`
+                  )}
+                </td>
                 <td class="num">{usd(l.cost_micro)}</td>
               </tr>
             ))}

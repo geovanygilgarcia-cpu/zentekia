@@ -12,6 +12,8 @@ import { HOSTED_DEFAULT_MODEL, PLANS } from '../db/seed'
 import { chatEnabled, parseJson, periodOf, periodRange, type AgentConfig, type AgentRow, type TenantRow, type VoiceConfig, type WidgetTheme } from '../db/types'
 import { effectivePrice } from '../billing/pricing'
 import { monthSpend } from '../billing/meter'
+import { tenantRates } from '../billing/rates'
+import { cleanResale, effectiveResale, resaleCharge } from '../billing/resale'
 import { enabledModels, providerFor } from '../models/router'
 import { ALLOWED_EXT, MAX_FILE_BYTES, deleteVectors, extractFile, processSource } from '../rag/kb'
 import { chatOrigin, normalizeOrigin, portalHostLabel, portalUrl } from '../lib/hosts'
@@ -22,10 +24,63 @@ import { createInvite, newWidgetKey } from '../lib/provision'
 import { sendEmail } from '../lib/email'
 import { addLibraryVoice, DEFAULT_VOICE_MODEL, listMexicanVoices, listVoices, syncVoiceAgent, VOICE_LLM, voiceAvailable, voiceCfg, VoiceError } from '../lib/elevenlabs'
 import { match, toCsv } from '../lib/router'
+import { toXlsx, XLSX_TYPE, type Cell } from '../lib/xlsx'
 import { TEMPLATES } from '../templates/industry'
 import { contrastProblems, DEFAULT_THEME, mergedTheme } from '../widget-theme'
+import { checkWebhookUrl, newWebhookSecret, sendWebhook } from '../tools/webhook'
+import type { ToolsConfig } from '../db/types'
 
 const hex = z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'color en formato #RRGGBB')
+
+const httpsUrl = z.string().trim().max(500).regex(/^https:\/\/[^\s]+\.[^\s]+$/i, 'La liga debe ser completa y empezar con https://')
+const WEBHOOK_EVENTS = ['conversation.analyzed', 'lead.detected', 'handoff.requested'] as const
+const toolsSchema = z
+  .object({
+    leads: z.object({ enabled: z.boolean() }).partial(),
+    handoff: z.object({ enabled: z.boolean(), when: z.string().max(800), message: z.string().max(300), email: z.boolean() }).partial(),
+    webhook: z.object({ enabled: z.boolean(), url: z.string().trim().max(500), events: z.array(z.enum(WEBHOOK_EVENTS)).max(3), rotate_secret: z.boolean() }).partial(),
+    booking: z.object({ enabled: z.boolean(), url: z.union([httpsUrl, z.literal('')]), when: z.string().max(500) }).partial(),
+    whatsapp: z.object({ enabled: z.boolean(), number: z.string().trim().max(25), message: z.string().max(300) }).partial(),
+    links: z.object({ enabled: z.boolean(), items: z.array(z.object({ label: z.string().trim().min(1).max(60), url: httpsUrl })).max(8) }).partial(),
+  })
+  .partial()
+
+/** Une los cambios de herramientas con lo guardado y valida lo que necesita datos */
+function mergeTools(current: ToolsConfig | undefined, patch: z.infer<typeof toolsSchema>): ToolsConfig {
+  const t: ToolsConfig = JSON.parse(JSON.stringify(current ?? {}))
+  for (const [k, v] of Object.entries(patch)) {
+    if (!v) continue
+    ;(t as Record<string, unknown>)[k] = { ...((t as Record<string, Record<string, unknown>>)[k] ?? {}), ...v }
+  }
+  if (t.webhook) {
+    const w = t.webhook as NonNullable<ToolsConfig['webhook']> & { rotate_secret?: boolean }
+    if (w.url) {
+      const c = checkWebhookUrl(w.url)
+      if ('error' in c) fail(400, 'webhook_url', c.error)
+      else w.url = c.url
+    }
+    if (w.enabled && !w.url) fail(400, 'webhook_url', 'Escribe el URL del webhook para activarlo.')
+    if (!w.secret || w.rotate_secret) w.secret = newWebhookSecret()
+    if (!w.events?.length) w.events = [...WEBHOOK_EVENTS]
+    delete w.rotate_secret
+  }
+  if (t.booking?.enabled && !t.booking.url) fail(400, 'booking_url', 'Pega la liga de tu calendario para activar Agendar citas.')
+  if (t.whatsapp) {
+    const digits = (t.whatsapp.number || '').replace(/\D/g, '')
+    if (t.whatsapp.number && (digits.length < 10 || digits.length > 15)) fail(400, 'whatsapp_number', 'Escribe el número de WhatsApp con lada del país, por ejemplo 52 55 1234 5678.')
+    t.whatsapp.number = digits
+    if (t.whatsapp.enabled && !digits) fail(400, 'whatsapp_number', 'Escribe el número de WhatsApp para activar la herramienta.')
+  }
+  if (t.links?.enabled && !t.links.items?.length) fail(400, 'links', 'Agrega al menos un enlace para activar Enlaces útiles.')
+  return t
+}
+
+/** Datos de prospecto sugeridos por tipo (quedan listos, pero la herramienta nace apagada) */
+const TEMPLATE_LEAD_FIELDS: Record<string, Array<'name' | 'phone' | 'email' | 'company'>> = {
+  ventas: ['name', 'phone', 'email'],
+  citas: ['name', 'phone'],
+  reclutamiento: ['name', 'phone', 'email'],
+}
 
 const agentSchema = z.object({
   name: z.string().trim().min(1).max(80).optional(),
@@ -45,6 +100,8 @@ const agentSchema = z.object({
   lead_criteria: z.string().max(1500).optional(),
   lead_fields: z.array(z.enum(['name', 'phone', 'email', 'company'])).max(4).optional(),
   lead_alerts: z.enum(['off', 'hot', 'warm']).optional(),
+  lead_custom: z.array(z.string().trim().min(1).max(40)).max(6).optional(),
+  tools: toolsSchema.optional(),
 })
 
 const themeSchema = z
@@ -94,6 +151,21 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
   const role = () => (ctx!.session.impersonator_id ? 'owner' : ctx!.user.role)
   let p: Record<string, string> | null
 
+  // La Guía Zentekia la administra Zentekia: el cliente la usa, pero no puede cambiarla
+  const GUIDE_LOCKED = 'La Guía Zentekia la administra Zentekia y no se puede modificar. Crea un asistente nuevo para personalizarlo.'
+  const isGuide = async (agentId: string | null | undefined) => {
+    if (!agentId) return false
+    const a = await repo.agent(agentId)
+    return Boolean(a && parseJson<AgentConfig>(a.config_json, {}).kind === 'guide')
+  }
+  if (m !== 'GET' && ctx) {
+    let target: string | null = null
+    if ((p = match('agents/:id', sub) || match('agents/:id/:x', sub) || match('agents/:id/:x/:y', sub) || match('voice/:id', sub))) target = p.id ?? null
+    else if ((p = match('widget/:id', sub) || match('widget/:id/logo', sub))) target = (await repo.widgets()).find((x) => x.id === p!.id)?.agent_id ?? null
+    else if ((p = match('kb/:id', sub) || match('kb/:id/reprocess', sub))) target = (await repo.source(p.id!))?.agent_id ?? null
+    if (target && target !== 'request' && (await isGuide(target))) fail(403, 'guide_locked', GUIDE_LOCKED)
+  }
+
   /* ---------- resumen ---------- */
   if (sub === 'overview' && m === 'GET') {
     any()
@@ -110,6 +182,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
           id: a.id,
           name: a.name,
           model_id: a.model_id,
+          kind: parseJson<AgentConfig>(a.config_json, {}).kind ?? null,
           created_at: a.created_at,
           conversations_30d: stats.find((x) => x.agent_id === a.id)?.n ?? 0,
           last_conversation_at: stats.find((x) => x.agent_id === a.id)?.last_at ?? null,
@@ -165,14 +238,28 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     )
     return json({ ok: true })
   }
+  // Asistente nuevo: nombre + tipo (plantilla con instrucciones base) + descripción opcional; herramientas apagadas
   if (sub === 'agents' && m === 'POST') {
     owner()
-    const b = await readJson(request, z.object({ name: z.string().trim().min(1).max(80) }))
+    const b = await readJson(request, z.object({ name: z.string().trim().min(1).max(80), template: z.string().max(40).optional(), description: z.string().trim().max(2000).optional() }))
     const current = await repo.listAgents()
     if (current.length >= 10) fail(400, 'limit', 'Máximo 10 agentes por cliente.')
-    const id = await repo.createAgent({ name: b.name, system_prompt: '', welcome_message: `Hola, soy ${b.name}. ¿En qué te ayudo?`, language: 'es', temperature: 0.4, model_id: HOSTED_DEFAULT_MODEL, provider_key_id: null, config_json: JSON.stringify({ business_name: tenant.name }) })
-    await repo.createWidget(id, newWidgetKey(), JSON.stringify({ assistant_name: b.name }), parseJson<string[]>((await repo.widgets())[0]?.allowed_origins, []))
-    await audit('agent.created', { agent_id: id })
+    const t = TEMPLATES.find((x) => x.id === b.template)
+    const cfg: AgentConfig = { business_name: tenant.name, template: t?.id ?? (b.template === 'otro' ? 'otro' : undefined) }
+    if (t) {
+      cfg.tone = t.tone
+      cfg.suggested_questions = t.suggested
+    }
+    if (b.description) cfg.business_description = b.description
+    // Las herramientas siempre son opcionales: el asistente nace con todas apagadas y se prenden en Herramientas
+    cfg.tools = { leads: { enabled: false } }
+    const fields = TEMPLATE_LEAD_FIELDS[t?.id ?? '']
+    if (fields) cfg.lead_fields = fields
+    const prompt = [b.description && !t ? `Qué debe hacer este asistente: ${b.description}` : '', t?.prompt ?? ''].filter(Boolean).join('\n\n')
+    const welcome = t ? t.welcome.replace('{negocio}', tenant.name) : `Hola, soy ${b.name}. ¿En qué te ayudo?`
+    const id = await repo.createAgent({ name: b.name, system_prompt: prompt, welcome_message: welcome, language: 'es', temperature: 0.4, model_id: HOSTED_DEFAULT_MODEL, provider_key_id: null, config_json: JSON.stringify(cfg) })
+    await repo.createWidget(id, newWidgetKey(), JSON.stringify({ assistant_name: b.name.split(' · ').pop() || b.name }), parseJson<string[]>((await repo.widgets())[0]?.allowed_origins, []))
+    await audit('agent.created', { agent_id: id, template: cfg.template ?? null })
     return json({ id })
   }
   // Prender o apagar el chat (texto) de un asistente
@@ -201,15 +288,36 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
       if (!a) fail(404, 'not_found', 'Agente no encontrado.')
       const b = await readJson(request, agentSchema)
       const cfg = parseJson<AgentConfig>(a!.config_json, {})
-      for (const k of ['tone', 'fallback_response', 'suggested_questions', 'business_name', 'business_description', 'show_sources', 'auto_end', 'end_when', 'template', 'lead_criteria', 'lead_fields', 'lead_alerts'] as const) {
+      for (const k of ['tone', 'fallback_response', 'suggested_questions', 'business_name', 'business_description', 'show_sources', 'auto_end', 'end_when', 'template', 'lead_criteria', 'lead_fields', 'lead_alerts', 'lead_custom'] as const) {
         if (b[k] !== undefined) (cfg as Record<string, unknown>)[k] = b[k]
       }
+      if (b.tools) cfg.tools = mergeTools(cfg.tools, b.tools)
       await repo.updateAgent(a!.id, { name: b.name, welcome_message: b.welcome_message, language: b.language, system_prompt: b.system_prompt, temperature: b.temperature, config_json: JSON.stringify(cfg) })
       await audit('agent.updated', { agent_id: a!.id, fields: Object.keys(b) })
       // Si tiene voz, la llamada usa las instrucciones nuevas
       const voiceWarning = await resyncVoice(a!.id)
       return json({ ok: true, voice_warning: voiceWarning })
     }
+  }
+
+  /* ---------- herramientas ---------- */
+  if ((p = match('agents/:id/webhook/test', sub)) && m === 'POST') {
+    any()
+    const a = await repo.agent(p.id!)
+    if (!a) fail(404, 'not_found', 'Agente no encontrado.')
+    const cfg = parseJson<AgentConfig>(a!.config_json, {})
+    const wh = cfg.tools?.webhook
+    if (!wh?.url || !wh.secret) fail(400, 'webhook_url', 'Guarda primero el URL del webhook.')
+    const r = await sendWebhook(wh!.url!, wh!.secret!, {
+      event: 'test',
+      tenant: tenant.slug,
+      agent: { id: a!.id, name: a!.name },
+      data: { message: 'Evento de prueba desde el portal de Zentekia.', contact: { name: 'Visitante de prueba', email: 'prueba@ejemplo.com', phone: '+525512345678', company: null }, lead: { status: 'hot', score: 90 } },
+    })
+    cfg.tools!.webhook = { ...wh, last_status: r.status, last_at: Date.now(), last_error: r.error }
+    await repo.updateAgent(a!.id, { config_json: JSON.stringify(cfg) })
+    await audit('webhook.tested', { agent_id: a!.id, ok: r.ok, status: r.status })
+    return json(r)
   }
 
   /* ---------- voz (ElevenLabs) ---------- */
@@ -415,6 +523,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     if (sub === 'kb/file') {
       const form = await request.formData()
       agentId = String(form.get('agent_id') || '')
+      if (await isGuide(agentId)) fail(403, 'guide_locked', GUIDE_LOCKED)
       const file = form.get('file')
       if (!file || typeof file === 'string') fail(400, 'file', 'Selecciona un archivo.')
       const f = file as unknown as File
@@ -441,11 +550,13 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     } else if (sub === 'kb/url') {
       const b = await readJson(request, z.object({ agent_id: z.string().max(64), url: z.string().trim().url().max(500) }))
       agentId = b.agent_id
+      if (await isGuide(agentId)) fail(403, 'guide_locked', GUIDE_LOCKED)
       if (!(await repo.agent(agentId))) fail(404, 'not_found', 'Agente no encontrado.')
       sourceId = await repo.createSource({ agent_id: agentId, type: 'url', name: b.url, url: b.url, r2_key: null, raw_text: null })
     } else {
       const b = await readJson(request, z.object({ agent_id: z.string().max(64), name: z.string().trim().min(1).max(120), text: z.string().min(20).max(500_000) }), 600_000)
       agentId = b.agent_id
+      if (await isGuide(agentId)) fail(403, 'guide_locked', GUIDE_LOCKED)
       if (!(await repo.agent(agentId))) fail(404, 'not_found', 'Agente no encontrado.')
       if ((totals?.chars ?? 0) + b.text.length > plan.maxKbChars) fail(400, 'limit', 'Superas el tamaño total de conocimiento de tu plan.')
       sourceId = await repo.createSource({ agent_id: agentId, type: 'text', name: b.name, url: null, r2_key: null, raw_text: b.text })
@@ -618,18 +729,28 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     const left = (await repo.pendingAnalysisIds(agentId, 500)).length
     return json({ analyzed: done, pending: left })
   }
-  if (sub === 'leads/export.csv' && m === 'GET') {
+  // Descarga en CSV o en Excel (.xlsx); en Excel las fechas van como fecha real (hora de México)
+  const sendTable = async (base: string, head: string[], body: Array<Array<Cell>>, xlsx: boolean) => {
+    if (xlsx) {
+      const bytes = await toXlsx([head, ...body], base)
+      return new Response(bytes, { headers: { 'Content-Type': XLSX_TYPE, 'Content-Disposition': `attachment; filename="${base}-${tenant.slug}.xlsx"`, 'Cache-Control': 'no-store' } })
+    }
+    const csv = toCsv([head, ...body.map((r) => r.map((v) => (v instanceof Date ? v.toISOString() : v)))])
+    return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="${base}-${tenant.slug}.csv"`, 'Cache-Control': 'no-store' } })
+  }
+  if ((sub === 'leads/export.csv' || sub === 'leads/export.xlsx') && m === 'GET') {
     owner()
     const f = convFilter()
     const rows = await repo.exportLeads({ ...f, lead: f.lead ?? 'prospect' })
-    await audit('leads.exported', { rows: rows.length })
+    await audit('leads.exported', { rows: rows.length, agent_id: f.agentId ?? null })
     const T: Record<string, string> = { hot: 'Caliente', warm: 'Tibio', cold: 'Frío', none: 'No prospecto' }
     const S: Record<string, string> = { new: 'Por contactar', contacted: 'Contactado', won: 'Ganado', lost: 'Perdido' }
-    const csv = toCsv([
+    return sendTable(
+      'prospectos',
       ['fecha', 'asistente', 'canal', 'temperatura', 'puntaje', 'seguimiento', 'nombre', 'telefono', 'correo', 'empresa', 'interes', 'siguiente_paso', 'resumen', 'conversacion'],
-      ...rows.map((r) => [new Date(r.last_message_at).toISOString(), r.agent_name, r.channel === 'voice' ? 'Llamada' : 'Chat', T[r.lead_status || ''] || 'Sin analizar', r.lead_score, S[r.lead_stage || 'new'], r.contact_name, r.contact_phone, r.contact_email, r.contact_company, r.interest, r.next_step, r.summary, r.id]),
-    ])
-    return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="prospectos-${tenant.slug}.csv"`, 'Cache-Control': 'no-store' } })
+      rows.map((r) => [new Date(r.last_message_at), r.agent_name, r.channel === 'voice' ? 'Llamada' : 'Chat', T[r.lead_status || ''] || 'Sin analizar', r.lead_score, S[r.lead_stage || 'new'], r.contact_name, r.contact_phone, r.contact_email, r.contact_company, r.interest, r.next_step, r.summary, r.id]),
+      sub.endsWith('.xlsx'),
+    )
   }
   if ((p = match('conversations/:id/analyze', sub)) && m === 'POST') {
     any()
@@ -667,15 +788,20 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     })
     return json({ ok: true, conversation: await repo.conversation(p.id!) })
   }
-  if (sub === 'conversations/export.csv' && m === 'GET') {
+  if ((sub === 'conversations/export.csv' || sub === 'conversations/export.xlsx') && m === 'GET') {
     owner()
     const now = Date.now()
     const from = Number(url.searchParams.get('from') || 0) || now - 30 * 86_400_000
     const to = Number(url.searchParams.get('to') || 0) || now + 1
-    const rows = await repo.exportMessages(from, to)
-    await audit('conversations.exported', { from, to, rows: rows.length })
-    const csv = toCsv([['conversacion', 'agente', 'sitio', 'rol', 'mensaje', 'fecha'], ...rows.map((r) => [r.conversation_id, r.agent, r.origin, r.role === 'user' ? 'visitante' : 'agente', r.content, new Date(r.created_at).toISOString()])])
-    return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="conversaciones-${tenant.slug}.csv"`, 'Cache-Control': 'no-store' } })
+    const f = convFilter()
+    const rows = await repo.exportMessages(from, to, f.agentId, f.channel)
+    await audit('conversations.exported', { from, to, agent_id: f.agentId ?? null, rows: rows.length })
+    return sendTable(
+      'conversaciones',
+      ['conversacion', 'agente', 'sitio', 'rol', 'mensaje', 'fecha'],
+      rows.map((r) => [r.conversation_id, r.agent, r.origin, r.role === 'user' ? 'visitante' : 'agente', r.content, new Date(r.created_at)]),
+      sub.endsWith('.xlsx'),
+    )
   }
   if ((p = match('conversations/:id', sub))) {
     if (m === 'GET') {
@@ -714,10 +840,15 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
       prices.push({ id: mo.id, name: mo.display_name, type: mo.type, in_per_1m_micro: pr.in_per_1m, out_per_1m_micro: pr.out_per_1m })
     }
     const avg = await repo.avgTokensPerConversation(Date.now() - 30 * 86_400_000)
+    const replies = await repo.avgRepliesPerConversation(Date.now() - 30 * 86_400_000)
     const agents = await repo.listAgents()
+    const rates = await tenantRates(env, tenant)
     return json({
       period,
       daily,
+      // Tarifa vigente del cliente: por mensaje (null = por tokens) y por minuto de voz
+      rates: { message_micro: rates.message_micro, minute_micro: rates.minute_micro, included_in: rates.included_in, included_out: rates.included_out },
+      avg_replies: replies && replies.convs > 0 ? { replies: Math.round((replies.replies / replies.convs) * 10) / 10, sample: replies.convs } : { replies: 6, sample: 0 },
       by_model: byModel.map((b) => ({ ...b, name: b.model_id === 'voice:elevenlabs' ? 'Llamadas de voz' : models.find((x) => x.id === b.model_id)?.display_name ?? b.model_id })),
       totals: { tokens_in: totals?.tin ?? 0, tokens_out: totals?.tout ?? 0, cost_micro: totals?.cost ?? 0 },
       projection_micro: projection,
@@ -729,16 +860,96 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
       statements: (await repo.statements()).map((s) => ({ period: s.period, total_micro: s.total_micro, status: s.status, tokens_in: s.tokens_in, tokens_out: s.tokens_out })),
     })
   }
+  /* ---------- reventa: lo que el cliente cobra a sus clientes por asistente ---------- */
+  const resaleBody = z.object({
+    message_usd: z.number().min(0).max(100_000).nullable(),
+    minute_usd: z.number().min(0).max(100_000).nullable(),
+    included_in: z.number().int().min(0).max(10_000_000).nullable(),
+    included_out: z.number().int().min(0).max(10_000_000).nullable(),
+    excess_in_usd_1m: z.number().min(0).max(100_000).nullable(),
+    excess_out_usd_1m: z.number().min(0).max(100_000).nullable(),
+  })
+  const resaleFromBody = (b: z.infer<typeof resaleBody>) => {
+    const mm = (v: number | null) => (v == null ? undefined : Math.round(v * 1e6))
+    return cleanResale({
+      message_micro: mm(b.message_usd),
+      minute_micro: mm(b.minute_usd),
+      included_in: b.included_in ?? undefined,
+      included_out: b.included_out ?? undefined,
+      excess_in_per_1m_micro: mm(b.excess_in_usd_1m),
+      excess_out_per_1m_micro: mm(b.excess_out_usd_1m),
+    })
+  }
+  if (sub === 'resale' && m === 'GET') {
+    owner()
+    const period = /^\d{4}-\d{2}$/.test(url.searchParams.get('period') || '') ? url.searchParams.get('period')! : periodOf(Date.now())
+    const [from, to] = periodRange(period)
+    const general = cleanResale(parseJson<unknown>(tenant.resale_json ?? null, {}))
+    const agents: Array<{
+      id: string
+      name: string
+      special: ReturnType<typeof cleanResale>
+      effective: ReturnType<typeof effectiveResale>
+      usage: { msgs: number; ex_in: number; ex_out: number; voice_secs: number; tokens_in: number; tokens_out: number }
+      charge: ReturnType<typeof resaleCharge>
+      paid_micro: number
+      profit_micro: number
+    }> = []
+    for (const a of await repo.listAgents()) {
+      const cfg = parseJson<AgentConfig>(a.config_json, {})
+      if (cfg.kind === 'guide') continue
+      const special = cleanResale(cfg.resale)
+      const eff = effectiveResale(general, special)
+      const u = await repo.agentResaleUsage(a.id, from, to, eff.included_in, eff.included_out)
+      const usage = { msgs: u?.msgs ?? 0, ex_in: u?.ex_in ?? 0, ex_out: u?.ex_out ?? 0, voice_secs: u?.voice_secs ?? 0 }
+      const charge = resaleCharge(eff, usage)
+      const paid = u?.paid ?? 0
+      agents.push({
+        id: a.id,
+        name: a.name,
+        special,
+        effective: eff,
+        usage: { ...usage, tokens_in: u?.tokens_in ?? 0, tokens_out: u?.tokens_out ?? 0 },
+        charge,
+        paid_micro: paid,
+        profit_micro: charge.total - paid,
+      })
+    }
+    const sum = (k: 'paid_micro' | 'profit_micro') => agents.reduce((t, x) => t + x[k], 0)
+    return json({ period, general, agents, totals: { charged_micro: agents.reduce((t, x) => t + x.charge.total, 0), paid_micro: sum('paid_micro'), profit_micro: sum('profit_micro') } })
+  }
+  if (sub === 'resale' && m === 'PUT') {
+    owner()
+    const b = await readJson(request, resaleBody)
+    const r = resaleFromBody(b)
+    await repo.updateSettings({ resale_json: Object.keys(r).length ? JSON.stringify(r) : null })
+    await audit('resale.general_updated', r)
+    return json({ ok: true })
+  }
+  if ((p = match('agents/:id/resale', sub)) && m === 'PUT') {
+    owner()
+    const a = await repo.agent(p.id!)
+    if (!a) fail(404, 'not_found', 'Agente no encontrado.')
+    const b = await readJson(request, resaleBody)
+    const cfg = parseJson<AgentConfig>(a!.config_json, {})
+    const r = resaleFromBody(b)
+    if (Object.keys(r).length) cfg.resale = r
+    else delete cfg.resale
+    await repo.updateAgent(a!.id, { config_json: JSON.stringify(cfg) })
+    await audit('resale.agent_updated', { agent_id: a!.id, ...r })
+    return json({ ok: true })
+  }
+
   if ((p = match('statements/:period', sub)) && m === 'GET') {
     owner()
     const s = await repo.statement(p.period!)
     if (!s) fail(404, 'not_found', 'Estado de cuenta no encontrado.')
-    const lines = parseJson<Array<{ model: string; type: string; tokens_in: number; tokens_out: number; in_per_1m_micro: number; out_per_1m_micro: number; cost_micro: number }>>(s!.lines_json, [])
+    const lines = parseJson<Array<{ model: string; type: string; tokens_in: number; tokens_out: number; in_per_1m_micro: number; out_per_1m_micro: number; cost_micro: number; billed_messages?: number; voice_secs?: number }>>(s!.lines_json, [])
     if (url.searchParams.get('format') === 'csv') {
       const csv = toCsv([
-        ['periodo', 'modelo', 'tipo', 'tokens_entrada', 'tokens_salida', 'tarifa_entrada_usd_1M', 'tarifa_salida_usd_1M', 'importe_usd'],
-        ...lines.map((l) => [s!.period, l.model, l.type === 'byok' ? 'fee de plataforma (BYOK)' : 'hosted', l.tokens_in, l.tokens_out, (l.in_per_1m_micro / 1e6).toFixed(4), (l.out_per_1m_micro / 1e6).toFixed(4), (l.cost_micro / 1e6).toFixed(4)]),
-        [s!.period, 'TOTAL', '', s!.tokens_in, s!.tokens_out, '', '', (s!.total_micro / 1e6).toFixed(2)],
+        ['periodo', 'concepto', 'tipo', 'mensajes_cobrados', 'minutos_voz', 'tokens_entrada', 'tokens_salida', 'importe_usd'],
+        ...lines.map((l) => [s!.period, l.model, l.type === 'voice' ? 'voz (por minuto)' : l.billed_messages ? 'chat (por mensaje)' : l.type === 'byok' ? 'fee de plataforma (BYOK)' : 'chat (por tokens)', l.billed_messages || 0, ((l.voice_secs || 0) / 60).toFixed(2), l.tokens_in, l.tokens_out, (l.cost_micro / 1e6).toFixed(4)]),
+        [s!.period, 'TOTAL', '', '', '', s!.tokens_in, s!.tokens_out, (s!.total_micro / 1e6).toFixed(2)],
       ])
       return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="estado-${tenant.slug}-${s!.period}.csv"` } })
     }

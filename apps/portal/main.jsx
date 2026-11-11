@@ -8,11 +8,14 @@ import { ThemeSwitch, ThemeToggle } from '../shared/Theme.jsx'
 import { stackTablesOnMobile } from '../shared/tableStack.js'
 import Agente from './sections/Agente.jsx'
 import Conocimiento from './sections/Conocimiento.jsx'
+import Herramientas from './sections/Herramientas.jsx'
 import Modelo from './sections/Modelo.jsx'
 import Widget from './sections/Widget.jsx'
 import Instalacion from './sections/Instalacion.jsx'
 import Conversaciones from './sections/Conversaciones.jsx'
 import Consumo from './sections/Consumo.jsx'
+import Reportes from './sections/Reportes.jsx'
+import Precios from './sections/Precios.jsx'
 import Equipo from './sections/Equipo.jsx'
 import Seguridad from './sections/Seguridad.jsx'
 import Wizard from './sections/Wizard.jsx'
@@ -32,6 +35,7 @@ const CHAT_SECTIONS = [
   { id: 'resumen', label: 'Resumen', icon: 'home', C: Resumen, roles: ['owner', 'editor'] },
   { id: 'agente', label: 'Agente', icon: 'spark', C: Agente, roles: ['owner', 'editor'] },
   { id: 'conocimiento', label: 'Conocimiento', icon: 'book', C: Conocimiento, roles: ['owner', 'editor'] },
+  { id: 'herramientas', label: 'Herramientas', icon: 'tool', C: Herramientas, roles: ['owner', 'editor'] },
   { id: 'modelo', label: 'Modelo', icon: 'cpu', C: Modelo, roles: ['owner'] },
   { id: 'widget', label: 'Widget', icon: 'brush', C: Widget, roles: ['owner', 'editor'] },
   { id: 'instalacion', label: 'Instalación', icon: 'code', C: Instalacion, roles: ['owner', 'editor'] },
@@ -39,6 +43,8 @@ const CHAT_SECTIONS = [
 ]
 /* Secciones de la cuenta (no dependen del asistente) */
 const ACCOUNT_SECTIONS = [
+  { id: 'reportes', label: 'Reportes', icon: 'report', C: Reportes, roles: ['owner', 'editor'] },
+  { id: 'precios', label: 'Tus precios', icon: 'tag', C: Precios, roles: ['owner'] },
   { id: 'consumo', label: 'Consumo y costos', icon: 'chart', C: Consumo, roles: ['owner'] },
   { id: 'equipo', label: 'Equipo', icon: 'users', C: Equipo, roles: ['owner'] },
   { id: 'seguridad', label: 'Seguridad', icon: 'shield', C: Seguridad, roles: ['owner'] },
@@ -93,13 +99,15 @@ function Portal({ me, logout, reloadMe }) {
 
   if (!ov) return <div class="loading">Cargando tu portal…</div>
 
-  const chatSections = CHAT_SECTIONS.filter((s) => s.roles.includes(role))
   const accountSections = ACCOUNT_SECTIONS.filter((s) => s.roles.includes(role))
   const agent = r.agentId ? ov.agents.find((a) => a.id === r.agentId) : null
+  // La Guía Zentekia la administra Zentekia: solo se ve su resumen, conversaciones e instalación
+  const isGuide = agent?.kind === 'guide'
+  const chatSections = CHAT_SECTIONS.filter((s) => s.roles.includes(role) && (!isGuide || ['resumen', 'conversaciones', 'instalacion'].includes(s.id)))
 
   // Ligas viejas (#/agente, #/widget…): llevan al último asistente abierto
   if (!r.agentId && (chatSections.some((s) => s.id === r.section) || r.section === 'bienvenida')) {
-    const id = (ov.agents.find((a) => a.id === lastAgent()) || ov.agents[0])?.id
+    const id = (ov.agents.find((a) => a.id === lastAgent()) || ov.agents.find((a) => a.kind !== 'guide') || ov.agents[0])?.id
     if (id) {
       location.replace(`#/a/${id}/${r.section}`)
       return null
@@ -121,7 +129,18 @@ function Portal({ me, logout, reloadMe }) {
     else if (accountSections.some((s) => s.id === id) || id === 'asistentes') location.hash = `#/${id}`
     else if (ov.agents[0]) location.hash = `#/a/${(ov.agents.find((a) => a.id === lastAgent()) || ov.agents[0]).id}/${id}`
   }
-  const props = { api, me, ov, agentId: agent?.id, agent, reload: loadOverview, reloadMe, go, readOnly: me.read_only, param: r.param }
+  const props = {
+    api,
+    me,
+    ov,
+    agentId: agent?.id,
+    agent,
+    reload: loadOverview,
+    reloadMe,
+    go,
+    readOnly: me.read_only || (isGuide && !accountSections.some((s) => s.id === r.section)),
+    param: r.param,
+  }
 
   // ¿Qué se muestra en el área principal?
   let view
@@ -215,6 +234,11 @@ function Portal({ me, logout, reloadMe }) {
                   )
                 })}
               </div>
+            </div>
+          )}
+          {isGuide && (
+            <div class="alert alert-ok" style="margin-bottom:18px">
+              <b>La Guía Zentekia la administra Zentekia</b> y no se puede modificar. Para tener un asistente a tu medida, <a href="#/">crea uno nuevo</a> con su ayuda.
             </div>
           )}
           {unread.length > 0 && r.section !== 'bienvenida' && (

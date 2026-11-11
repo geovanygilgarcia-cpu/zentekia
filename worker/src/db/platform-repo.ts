@@ -24,6 +24,7 @@ export class PlatformRepo {
   async listTenants(from: number, to: number) {
     const r = await this.q(
       `SELECT t.id, t.slug, t.name, t.status, t.plan_id, t.monthly_limit_micro, t.limit_behavior, t.enabled_models, t.created_at, t.onboarded,
+         t.price_message_micro, t.price_minute_micro, t.msg_included_in, t.msg_included_out,
          COALESCE(u.tin, 0) AS tokens_in, COALESCE(u.tout, 0) AS tokens_out, COALESCE(u.cost, 0) AS cost_micro,
          (SELECT COUNT(*) FROM alerts a WHERE a.tenant_id = t.id AND a.read_at IS NULL) AS open_alerts,
          (SELECT email FROM users x WHERE x.tenant_id = t.id AND x.role = 'owner' ORDER BY x.created_at LIMIT 1) AS owner_email
@@ -42,8 +43,8 @@ export class PlatformRepo {
       t.id, t.slug, t.name, t.plan_id, t.monthly_limit_micro, t.currency, t.limit_behavior, t.enabled_models, t.data_key_enc, Date.now(),
     ).run()
   }
-  async updateTenant(tid: string, f: Partial<Pick<TenantRow, 'name' | 'status' | 'plan_id' | 'monthly_limit_micro' | 'limit_behavior' | 'enabled_models' | 'suspended_message' | 'turnstile' | 'currency'>>) {
-    const allowed = ['name', 'status', 'plan_id', 'monthly_limit_micro', 'limit_behavior', 'enabled_models', 'suspended_message', 'turnstile', 'currency'] as const
+  async updateTenant(tid: string, f: Partial<Pick<TenantRow, 'name' | 'status' | 'plan_id' | 'monthly_limit_micro' | 'limit_behavior' | 'enabled_models' | 'suspended_message' | 'turnstile' | 'currency' | 'price_message_micro' | 'price_minute_micro' | 'msg_included_in' | 'msg_included_out'>>) {
+    const allowed = ['name', 'status', 'plan_id', 'monthly_limit_micro', 'limit_behavior', 'enabled_models', 'suspended_message', 'turnstile', 'currency', 'price_message_micro', 'price_minute_micro', 'msg_included_in', 'msg_included_out'] as const
     const sets: string[] = []
     const vals: unknown[] = []
     for (const k of allowed) {
@@ -194,16 +195,53 @@ export class PlatformRepo {
   }
 
   /* ---------- reportes y estados de cuenta ---------- */
+  /** Tokens promedio por respuesta del asistente (para elegir cuántos incluir por mensaje) */
+  replyTokenStats(since: number) {
+    return this.q(
+      `SELECT COUNT(*) AS n, ROUND(AVG(tokens_in)) AS avg_in, ROUND(AVG(tokens_out)) AS avg_out, MAX(tokens_in) AS max_in, MAX(tokens_out) AS max_out
+       FROM usage_ledger WHERE kind = 'chat' AND created_at >= ?`,
+      since,
+    ).first<{ n: number; avg_in: number | null; avg_out: number | null; max_in: number | null; max_out: number | null }>()
+  }
+  /** Consumo por cliente y modelo. token_cost_micro: lo que costaría por tokens (en registros viejos, cobrados por token, es el mismo importe) */
   usageReport(from: number, to: number, tenantId?: string) {
     return this.q(
       `SELECT l.tenant_id, t.name AS tenant_name, t.slug, l.model_id, l.model_type,
          SUM(l.tokens_in) AS tokens_in, SUM(l.tokens_out) AS tokens_out, SUM(l.cost_micro) AS cost_micro, COUNT(*) AS messages,
-         SUM(l.estimated) AS estimated
+         SUM(l.estimated) AS estimated,
+         SUM(CASE WHEN l.billing = 'message' THEN COALESCE(l.units, 1) ELSE 0 END) AS billed_messages,
+         COALESCE(SUM(l.overage_micro), 0) AS overage_micro,
+         SUM(CASE WHEN l.overage_micro > 0 THEN 1 ELSE 0 END) AS overage_messages,
+         SUM(CASE WHEN l.model_type <> 'voice' THEN 0
+                  WHEN l.units IS NOT NULL THEN l.units
+                  WHEN INSTR(l.price_version, '/min:') > 0 THEN CAST(REPLACE(SUBSTR(l.price_version, INSTR(l.price_version, '/min:') + 5), 's', '') AS INTEGER)
+                  ELSE 0 END) AS voice_secs,
+         SUM(CASE WHEN l.billing IS NULL OR l.billing = 'token' THEN l.cost_micro ELSE 0 END) AS token_billed_micro,
+         SUM(COALESCE(l.token_cost_micro, CASE WHEN l.model_type <> 'voice' THEN l.cost_micro END, 0)) AS token_cost_micro,
+         MAX(CASE WHEN l.model_type <> 'voice' THEN 1 ELSE 0 END) AS token_cost_known
        FROM usage_ledger l JOIN tenants t ON t.id = l.tenant_id
        WHERE l.created_at >= ? AND l.created_at < ? ${tenantId ? 'AND l.tenant_id = ?' : ''}
        GROUP BY l.tenant_id, l.model_id, l.model_type ORDER BY t.name, l.model_id`,
       ...(tenantId ? [from, to, tenantId] : [from, to]),
-    ).all<{ tenant_id: string; tenant_name: string; slug: string; model_id: string; model_type: string; tokens_in: number; tokens_out: number; cost_micro: number; messages: number; estimated: number }>().then((r) => r.results)
+    ).all<{
+      tenant_id: string
+      tenant_name: string
+      slug: string
+      model_id: string
+      model_type: string
+      tokens_in: number
+      tokens_out: number
+      cost_micro: number
+      messages: number
+      estimated: number
+      billed_messages: number
+      overage_micro: number
+      overage_messages: number
+      voice_secs: number
+      token_billed_micro: number
+      token_cost_micro: number
+      token_cost_known: number
+    }>().then((r) => r.results)
   }
   dailyTotals(from: number, to: number) {
     return this.q(

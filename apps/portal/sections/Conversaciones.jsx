@@ -2,7 +2,6 @@ import { useEffect, useState } from 'preact/hooks'
 import Markdown from '../../shared/Markdown.jsx'
 import { date, num } from '../../shared/api.js'
 import { toast } from '../../shared/toast.jsx'
-import { PORTAL_BASE } from '../env.js'
 import { Field, PageHead, useAction } from './common.jsx'
 import { Icon } from './icons.jsx'
 
@@ -23,14 +22,6 @@ const STAGES = [
 const isProspect = (c) => c.lead_status === 'hot' || c.lead_status === 'warm' || c.lead_status === 'cold'
 const pendingOf = (c) => !c.analyzed_at || c.analyzed_at < c.last_message_at
 
-/* Accesos rápidos de la cabecera: cada uno es un juego de filtros */
-const PRESETS = [
-  { id: 'all', k: 'Conversaciones', stat: 'total', f: {} },
-  { id: 'prospects', k: 'Prospectos', stat: 'prospects', f: { lead: 'prospect' } },
-  { id: 'hot', k: 'Calientes', stat: 'hot', f: { lead: 'hot' } },
-  { id: 'todo', k: 'Por contactar', stat: 'to_contact', f: { lead: 'prospect', stage: 'new' } },
-  { id: 'contact', k: 'Con datos de contacto', stat: 'with_contact', f: { lead: 'prospect', contact: 'any' } },
-]
 const EMPTY = { lead: '', contact: '', stage: '', channel: '', status: '', rating: '' }
 
 export function LeadPill({ status, score }) {
@@ -104,7 +95,6 @@ export default function Conversaciones({ api, ov, me, readOnly, agentId, param }
     setF({ ...f, ...patch })
     setPage(0)
   }
-  const activePreset = PRESETS.find((p) => Object.keys(EMPTY).every((k) => (p.f[k] || '') === f[k]))?.id
   const extraCount = ['contact', 'stage', 'channel', 'status', 'rating'].filter((k) => f[k]).length
 
   // Cambios en la conversación abierta se reflejan en la lista sin recargar todo
@@ -139,42 +129,24 @@ export default function Conversaciones({ api, ov, me, readOnly, agentId, param }
     }
   }
 
-  const exportBase = () => {
-    const p = params()
-    p.delete('q')
-    return p
-  }
-
   return (
     <>
       <PageHead title="Conversaciones" sub="Lo que platicaron con tu agente, con un resumen de cada una y los prospectos que dejó.">
         <div class="row" style="gap:8px;flex-wrap:wrap;justify-content:flex-end">
           <button class="b b-outline b-sm" onClick={() => setRules(true)}><Icon name="target" size={15} />Reglas de prospectos</button>
-          {owner && (
-            <>
-              <a class="b b-outline b-sm" href={`${PORTAL_BASE}/leads/export.csv?${exportBase()}`} download>Exportar prospectos</a>
-              <a class="b b-ghost b-sm" href={`${PORTAL_BASE}/conversations/export.csv?from=${from || 1}&to=${Date.now() + 60_000}`} download>Exportar mensajes</a>
-            </>
-          )}
+          {/* Los totales y las descargas (Excel / CSV) viven en Reportes */}
+          <a class="b b-ghost b-sm" href={`#/a/${agentId}/reportes`}><Icon name="report" size={15} />Ver reportes</a>
         </div>
       </PageHead>
 
-      <div class={'lead-top' + (sel ? ' conv-open' : '')}>
-      <div class="lead-kpis" role="group" aria-label="Accesos rápidos">
-        {PRESETS.map((p) => (
-          <button key={p.id} type="button" class={'lead-kpi' + (activePreset === p.id ? ' on' : '') + (p.id === 'hot' ? ' is-hot' : '')} onClick={() => { setF({ ...EMPTY, ...p.f }); setPage(0); setMore(false) }} aria-pressed={activePreset === p.id}>
-            <span class="k">{p.k}</span>
-            <span class="v">{stats ? num(stats[p.stat]) : '—'}</span>
-          </button>
-        ))}
-      </div>
       {stats?.pending > 0 && canEdit && (
-        <div class="lead-pending-bar">
-          <span><b>{num(stats.pending)}</b> {stats.pending === 1 ? 'conversación sigue' : 'conversaciones siguen'} sin resumen. Se analizan solas cuando terminan o tras {30} min sin mensajes.</span>
-          <button class="b b-outline b-sm" onClick={sweep} disabled={sweeping}><Icon name="refresh" size={14} />{sweeping ? 'Analizando…' : 'Analizar ahora'}</button>
+        <div class={'lead-top' + (sel ? ' conv-open' : '')}>
+          <div class="lead-pending-bar">
+            <span><b>{num(stats.pending)}</b> {stats.pending === 1 ? 'conversación sigue' : 'conversaciones siguen'} sin resumen. Se analizan solas cuando terminan o tras {30} min sin mensajes.</span>
+            <button class="b b-outline b-sm" onClick={sweep} disabled={sweeping}><Icon name="refresh" size={14} />{sweeping ? 'Analizando…' : 'Analizar ahora'}</button>
+          </div>
         </div>
       )}
-      </div>
 
       <div class={'cols conv-cols' + (sel ? ' conv-open' : '')}>
         <div class="col-form">
@@ -475,7 +447,7 @@ function RulesModal({ api, agentId, canEdit, onClose }) {
         <div class="row" style="align-items:flex-start">
           <div class="grow">
             <h2 id="rules-title">Reglas de prospectos</h2>
-            <p class="sub" style="margin-top:4px">Al terminar cada conversación, Zentekia escribe un resumen, decide si es un posible cliente y guarda los datos de contacto que dejó.</p>
+            <p class="sub" style="margin-top:4px">Al terminar cada conversación, Zentekia escribe un resumen, decide si es un posible cliente y guarda los datos de contacto que dejó. Puedes apagar los prospectos de un asistente en Herramientas.</p>
           </div>
           <button type="button" class="icon-x" onClick={onClose} aria-label="Cerrar"><Icon name="x" /></button>
         </div>

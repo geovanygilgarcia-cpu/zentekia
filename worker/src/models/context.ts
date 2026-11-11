@@ -3,7 +3,8 @@
   Orden: reglas base de Zentekia (el cliente no las puede quitar) → instrucciones del negocio →
   conocimiento recuperado marcado como material NO confiable.
 */
-import { parseJson, type AgentConfig, type AgentRow, type TenantRow } from '../db/types'
+import { leadsEnabled, parseJson, type AgentConfig, type AgentRow, type TenantRow } from '../db/types'
+import { toolPrompts, voiceToolPrompts } from '../tools'
 import type { RetrievedChunk } from '../rag/kb'
 
 const LANG: Record<string, string> = { es: 'español', en: 'inglés', pt: 'portugués' }
@@ -16,7 +17,7 @@ export function platformRules(language: string, fallback: string): string {
 - No inventes precios, datos, políticas, enlaces ni promociones. Si la información no está en las instrucciones del negocio ni en <conocimiento>, responde: "${fallback.replace(/"/g, "'")}"
 - No pidas ni aceptes contraseñas, números completos de tarjeta, CVV/NIP ni códigos de verificación.
 - No generes contenido sexual, de odio, de violencia ni ayudes con actividades ilegales o peligrosas. No des diagnósticos médicos ni asesoría legal o financiera definitiva: sugiere consultar a un profesional.
-- No tienes acceso a sistemas (salvo la herramienta de finalizar, si se te indica abajo): no prometas acciones que no puedes hacer (reembolsos, cambios de cuenta); ofrece canalizar con una persona.
+- No tienes acceso a sistemas (salvo las herramientas que se te indiquen abajo): no prometas acciones que no puedes hacer (reembolsos, cambios de cuenta); ofrece canalizar con una persona.
 - Responde en ${LANG[language] || 'español'}, con mensajes breves y claros (2 a 5 líneas), salvo que el visitante pida detalle. Puedes usar **negritas** y listas con "- ". No uses HTML.`
 }
 
@@ -31,8 +32,9 @@ export function buildSystem(tenant: TenantRow, agent: AgentRow, kb: RetrievedChu
   if (agent.system_prompt.trim()) negocio.push(agent.system_prompt.trim())
   parts.push(`[INSTRUCCIONES DEL NEGOCIO]\n${negocio.join('\n')}`)
   if (cfg.auto_end) parts.push(endTool(cfg.end_when))
-  const captura = leadCapture(cfg)
+  const captura = leadsEnabled(cfg) ? leadCapture(cfg) : null
   if (captura) parts.push(captura)
+  parts.push(...toolPrompts(cfg))
   if (kb.length) {
     const docs = kb
       .map((c, i) => `<fuente n="${i + 1}" titulo="${escapeAttr(c.source_name)}">\n${c.text.replace(/<\/?(conocimiento|fuente)[^>]*>/gi, '')}\n</fuente>`)
@@ -48,7 +50,7 @@ const LEAD_FIELD_NAMES: Record<string, string> = { name: 'nombre', phone: 'telé
 
 /** Captura de datos de contacto: el cliente elige qué pedir en Conversaciones → Reglas de prospectos */
 export function leadCapture(cfg: AgentConfig): string | null {
-  const fields = (cfg.lead_fields || []).map((f) => LEAD_FIELD_NAMES[f]).filter(Boolean)
+  const fields = [...(cfg.lead_fields || []).map((f) => LEAD_FIELD_NAMES[f]).filter(Boolean), ...(cfg.lead_custom || []).map((x) => x.replace(/[\[\]<>]/g, '').trim().toLowerCase()).filter(Boolean)]
   if (!fields.length) return null
   return `[CAPTURA DE DATOS DE CONTACTO]
 Cuando el visitante muestre interés real (pregunte por precios, disponibilidad, una cotización, una cita o quiera que lo contacten), pídele de forma natural y amable: ${fields.join(', ')}.
@@ -97,8 +99,9 @@ export function buildVoiceSystem(tenant: TenantRow, agent: AgentRow): string {
   if (cfg.business_description) negocio.push(`Sobre la empresa: ${cfg.business_description}`)
   if (cfg.tone) negocio.push(`Tono: ${cfg.tone}.`)
   if (agent.system_prompt.trim()) negocio.push(agent.system_prompt.trim())
-  const captura = leadCapture(cfg)
+  const captura = leadsEnabled(cfg) ? leadCapture(cfg) : null
   if (captura) negocio.push(captura)
+  negocio.push(...voiceToolPrompts(cfg))
   const colgar = `[COLGAR LA LLAMADA]
 Tienes la herramienta "end_call" para colgar. Úsala ${cfg.auto_end && cfg.end_when?.trim() ? cfg.end_when.trim() : 'cuando el cliente se despida, diga que ya no necesita nada más, o cuando ya resolviste lo que necesitaba.'}
 - Antes de colgar confirma en una frase lo acordado (si aplica) y despídete con amabilidad.

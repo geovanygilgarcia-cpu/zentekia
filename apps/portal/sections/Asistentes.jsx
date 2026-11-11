@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { num } from '../../shared/api.js'
-import { Field, PageHead, useAction } from './common.jsx'
+import { Field, PageHead, TestWidget, useAction } from './common.jsx'
 import { Icon } from './icons.jsx'
 
 const CH = [
@@ -107,6 +107,86 @@ export function RequestModal({ api, onClose, preset }) {
   )
 }
 
+/** Tipos de asistente: cada uno nace con instrucciones base (templates del Worker) */
+const TYPES = [
+  { id: 'ventas', label: 'Ventas', icon: 'target', desc: 'Orienta, cotiza y toma datos de interesados.' },
+  { id: 'soporte', label: 'Soporte a clientes', icon: 'chat', desc: 'Resuelve dudas y pasa casos a tu equipo.' },
+  { id: 'citas', label: 'Agendar citas', icon: 'calendar', desc: 'Explica servicios y toma datos para la cita.' },
+  { id: 'cobranza', label: 'Cobranza', icon: 'bolt', desc: 'Recuerda pagos con amabilidad y da opciones.' },
+  { id: 'reclutamiento', label: 'Reclutamiento', icon: 'users', desc: 'Explica vacantes y recibe candidatos.' },
+  { id: 'otro', label: 'Otro', icon: 'edit', desc: 'Tú describes qué debe hacer.' },
+]
+
+/** El cliente crea su propio asistente eligiendo un tipo */
+function CreateModal({ api, onClose, onRequest }) {
+  const [name, setName] = useState('')
+  const [type, setType] = useState('ventas')
+  const [desc, setDesc] = useState('')
+  const [busy, run] = useAction()
+  const nameRef = useRef(null)
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose()
+    document.addEventListener('keydown', onKey)
+    nameRef.current?.focus()
+    return () => document.removeEventListener('keydown', onKey)
+  }, [])
+  const other = type === 'otro'
+  const submit = async (e) => {
+    e.preventDefault()
+    const r = await run(() => api.post('agents', { name: name.trim(), template: type, description: desc.trim() || undefined }), 'Asistente creado')
+    if (r?.id) onClose(r.id)
+  }
+  return (
+    <div class="modal-bg" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <form class="modal" style="width:min(620px,100%)" role="dialog" aria-modal="true" aria-labelledby="new-title" onSubmit={submit}>
+        <div class="row" style="align-items:flex-start">
+          <div class="grow">
+            <h2 id="new-title">Crear asistente</h2>
+            <p class="sub" style="margin-top:4px">Elige para qué es y nace con instrucciones base de ese tipo. Después lo ajustas a tu negocio y prendes las herramientas que quieras.</p>
+          </div>
+          <button type="button" class="icon-x" onClick={() => onClose()} aria-label="Cerrar"><Icon name="x" /></button>
+        </div>
+        <Field label="Nombre del asistente">
+          <input ref={nameRef} value={name} onInput={(e) => setName(e.target.value)} maxLength={80} required placeholder="Ej.: Ventas · Ana, Soporte, Recepción" />
+        </Field>
+        <div class="l">¿Para qué es?</div>
+        <div class="new-types" role="radiogroup" aria-label="Tipo de asistente">
+          {TYPES.map((t) => (
+            <label key={t.id} class={'new-type' + (type === t.id ? ' on' : '')}>
+              <input type="radio" name="type" value={t.id} checked={type === t.id} onChange={() => setType(t.id)} />
+              <span class="new-type-ic" aria-hidden="true"><Icon name={t.icon} size={17} /></span>
+              <span class="grow">
+                <b>{t.label}</b>
+                <span class="small muted">{t.desc}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        <Field label={other ? '¿Qué debe hacer?' : '¿Qué debe hacer? (opcional)'} hint="En tus palabras. Lo puedes cambiar cuando quieras en la sección Agente.">
+          <textarea
+            rows="3"
+            value={desc}
+            maxLength={2000}
+            required={other}
+            onInput={(e) => setDesc(e.target.value)}
+            placeholder={other ? 'Ej.: Responde dudas de mi gimnasio, horarios y precios, y aparta clases de prueba.' : 'Ej.: Somos una clínica dental en Monterrey; atiende de lunes a sábado.'}
+          />
+        </Field>
+        <div class="new-next small muted">
+          <b>Después:</b> ajusta sus instrucciones en <b>Agente</b>, sube tus documentos en <b>Conocimiento</b>, prende lo que necesites en <b>Herramientas</b> (todas son opcionales) y copia el código en <b>Instalación</b>.
+        </div>
+        <div class="row" style="margin-top:18px;gap:8px;justify-content:space-between;flex-wrap:wrap">
+          <button type="button" class="link small" onClick={onRequest}>¿Prefieres que lo haga Zentekia?</button>
+          <span class="row" style="gap:8px">
+            <button type="button" class="b b-ghost" onClick={() => onClose()}>Cancelar</button>
+            <button class="b b-primary" disabled={busy || !name.trim() || (other && !desc.trim())}><Icon name="plus" size={15} />Crear asistente</button>
+          </span>
+        </div>
+      </form>
+    </div>
+  )
+}
+
 const chHref = (agent, key) => `#/a/${agent.id}/${key === 'chat' ? 'resumen' : key === 'voice' ? 'voz' : 'whatsapp'}`
 const chState = (agent, key) => agent.channels?.[key] || (key === 'chat' ? 'active' : 'soon')
 const ago = (t) => {
@@ -130,7 +210,7 @@ function AgentCard({ agent, suspended }) {
       <a class="ag-top" href={href}>
         <AgentAvatar agent={agent} size={52} />
         <div class="grow ag-id">
-          <div class="ag-name" title={agent.name}>{agent.name}</div>
+          <div class="ag-name" title={agent.name}>{agent.name}{agent.kind === 'guide' && <span class="ag-guide">Guía</span>}</div>
           <Status suspended={suspended} />
         </div>
         <div class="ag-stat" title="Conversaciones en los últimos 30 días">
@@ -159,7 +239,7 @@ function AgentRow({ agent, suspended }) {
       <a class="ag-row-main" href={href} role="cell">
         <AgentAvatar agent={agent} size={40} />
         <span class="ag-id">
-          <span class="ag-row-name" title={agent.name}>{agent.name}</span>
+          <span class="ag-row-name" title={agent.name}>{agent.name}{agent.kind === 'guide' && <span class="ag-guide">Guía</span>}</span>
           <Status suspended={suspended} />
         </span>
       </a>
@@ -191,8 +271,13 @@ const SORTS = {
 }
 const norm = (t) => t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase()
 
-export default function Asistentes({ ov, me, readOnly, api }) {
+export default function Asistentes({ ov, me, readOnly, api, reload }) {
   const [asking, setAsking] = useState(false)
+  const [creating, setCreating] = useState(false)
+  const [talking, setTalking] = useState(false)
+  // La Guía Zentekia no se lista con los demás: tiene su propia tarjeta abajo
+  const guide = ov.agents.find((a) => a.kind === 'guide')
+  const agents = ov.agents.filter((a) => a.kind !== 'guide')
   const [q, setQ] = useState('')
   const [act, setAct] = useState('all')
   const [sort, setSort] = useState('name')
@@ -212,29 +297,29 @@ export default function Asistentes({ ov, me, readOnly, api }) {
   const canRequest = me.user.role === 'owner' && !readOnly
   const suspended = ov.tenant.status === 'suspended'
   const nq = norm(q.trim())
-  const list = ov.agents
+  const list = agents
     .filter((a) => !nq || norm(a.name).includes(nq))
     .filter((a) => act === 'all' || (act === 'active' ? a.conversations_30d > 0 : !a.conversations_30d))
     .sort(SORTS[sort][1])
   const filtering = nq || act !== 'all'
-  const withActivity = ov.agents.filter((a) => a.conversations_30d > 0).length
+  const withActivity = agents.filter((a) => a.conversations_30d > 0).length
 
   return (
     <>
       <PageHead title="Elige un asistente" sub="Entra a un asistente para configurarlo y ver sus canales: chat, voz y WhatsApp.">
         {canRequest && view === 'list' && (
-          <button class="b b-primary b-sm" onClick={() => setAsking(true)}><Icon name="plus" size={15} />Solicitar asistente</button>
+          <button class="b b-primary b-sm" onClick={() => setCreating(true)}><Icon name="plus" size={15} />Crear asistente</button>
         )}
       </PageHead>
 
-      {ov.agents.length > 1 && (
+      {agents.length > 1 && (
         <div class="ag-tools">
           <label class="ag-search">
             <Icon name="search" size={17} />
             <input type="search" placeholder="Buscar asistente…" value={q} onInput={(e) => setQ(e.target.value)} aria-label="Buscar asistente" />
           </label>
           <div class="ag-chips" role="group" aria-label="Filtrar por actividad">
-            {[['all', 'Todos', ov.agents.length], ['active', 'Con actividad', withActivity], ['idle', 'Sin actividad', ov.agents.length - withActivity]].map(([k, l, n]) => (
+            {[['all', 'Todos', agents.length], ['active', 'Con actividad', withActivity], ['idle', 'Sin actividad', agents.length - withActivity]].map(([k, l, n]) => (
               <button key={k} type="button" aria-pressed={act === k} onClick={() => setAct(k)} title={k === 'all' ? undefined : `${l} en los últimos 30 días`}>{l}<span class="ag-n">{n}</span></button>
             ))}
           </div>
@@ -257,7 +342,7 @@ export default function Asistentes({ ov, me, readOnly, api }) {
         </div>
       )}
 
-      {list.length === 0 && filtering ? (
+      {!agents.length ? null : list.length === 0 && filtering ? (
         <div class="card empty">No hay asistentes que coincidan con «{q || 'el filtro'}».</div>
       ) : view === 'list' ? (
         <div class="ag-list" role="table" aria-label="Asistentes">
@@ -278,14 +363,48 @@ export default function Asistentes({ ov, me, readOnly, api }) {
             <AgentCard key={a.id} agent={a} suspended={suspended} />
           ))}
           {canRequest && !filtering && (
-            <button type="button" class="ag-new" onClick={() => setAsking(true)}>
+            <button type="button" class="ag-new" onClick={() => setCreating(true)}>
               <span class="ag-new-ic"><Icon name="plus" size={22} /></span>
-              <b>Solicitar un asistente</b>
-              <span>Lo damos de alta por ti.</span>
+              <b>Crear un asistente</b>
+              <span>Elige para qué es y queda listo para configurarlo.</span>
             </button>
           )}
-          {!ov.agents.length && !canRequest && <div class="empty">Todavía no hay asistentes en tu cuenta.</div>}
+          {!agents.length && !canRequest && <div class="empty">Todavía no hay asistentes en tu cuenta.</div>}
         </div>
+      )}
+      {guide && !filtering && (
+        <div class="card bld-cta">
+          <span class="bld-av" aria-hidden="true"><Icon name="compass" size={22} /></span>
+          <div class="grow">
+            <b>{agents.length ? '¿Dudas con el portal?' : 'Crea tu primer asistente'}</b>
+            <p class="small muted" style="margin:3px 0 0">Platica con la Guía Zentekia: te explica qué tiene la plataforma, cómo crear un asistente y cómo dejarlo listo en tu sitio.</p>
+          </div>
+          <div class="row" style="gap:8px;flex-wrap:wrap">
+            {guide.widget_key && (
+              <button class="b b-outline" onClick={() => setTalking(true)}><Icon name="chat" size={15} />Hablar con la Guía</button>
+            )}
+            {canRequest && (
+              <button class="b b-primary" onClick={() => setCreating(true)}><Icon name="plus" size={15} />Crear asistente</button>
+            )}
+          </div>
+        </div>
+      )}
+      {talking && <TestWidget widgetKey={guide.widget_key} title="Guía Zentekia" onClose={() => setTalking(false)} />}
+      {creating && (
+        <CreateModal
+          api={api}
+          onRequest={() => {
+            setCreating(false)
+            setAsking(true)
+          }}
+          onClose={async (id) => {
+            setCreating(false)
+            if (id) {
+              await reload?.()
+              location.hash = `#/a/${id}/agente`
+            }
+          }}
+        />
       )}
       {asking && <RequestModal api={api} onClose={() => setAsking(false)} />}
     </>

@@ -9,6 +9,7 @@ import { TenantRepo } from '../db/tenant-repo'
 import { PLANS, RESERVED_SLUGS } from '../db/seed'
 import { parseJson, periodOf, periodRange } from '../db/types'
 import { effectivePrice } from '../billing/pricing'
+import { fallbackMinuteMicro, globalRates, providerCosts, realCost, setGlobalRates, setProviderCosts, tenantRates } from '../billing/rates'
 import { clientIp, fail, json, randomToken, readJson, sha256Hex } from '../lib/http'
 import { portalHostLabel, portalUrl } from '../lib/hosts'
 import { createInvite, provisionTenant } from '../lib/provision'
@@ -93,6 +94,9 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
         users: await repo.users(),
         agents: (await repo.listAgents()).map((a) => ({ id: a.id, name: a.name, model_id: a.model_id })),
         spend: await repo.spendBetween(from, to),
+        rates: await tenantRates(env, tenant),
+        general_rates: { ...(await globalRates(env.DB)), fallback_minute_micro: fallbackMinuteMicro(env) },
+        reply_tokens: await repo.replyTokenStats(Date.now() - 30 * 86_400_000),
         alerts: await repo.alerts(10),
         audit: await platform.tenantAudit(tenant.id, 30),
       })
@@ -108,8 +112,15 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
           enabled_models: z.array(z.string().max(60)).max(30).optional(),
           suspended_message: z.string().max(300).optional(),
           turnstile: z.boolean().optional(),
+          // null = usar el precio general
+          price_message_usd: usd.nullable().optional(),
+          price_minute_usd: usd.nullable().optional(),
+          // tokens incluidos por mensaje; null = el general
+          msg_included_in: z.number().int().min(0).max(10_000_000).nullable().optional(),
+          msg_included_out: z.number().int().min(0).max(10_000_000).nullable().optional(),
         }),
       )
+      const priceOf = (v: number | null | undefined) => (v === undefined ? undefined : v === null ? null : toMicro(v))
       await platform.updateTenant(tenant.id, {
         name: b.name,
         plan_id: b.plan_id,
@@ -118,6 +129,10 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
         enabled_models: b.enabled_models ? JSON.stringify(b.enabled_models) : undefined,
         suspended_message: b.suspended_message,
         turnstile: b.turnstile === undefined ? undefined : b.turnstile ? 1 : 0,
+        price_message_micro: priceOf(b.price_message_usd),
+        price_minute_micro: priceOf(b.price_minute_usd),
+        msg_included_in: b.msg_included_in,
+        msg_included_out: b.msg_included_out,
       })
       await audit('tenant.updated', tenant.id, b)
       return json({ ok: true })
@@ -235,21 +250,56 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
     return json({ ok: true })
   }
 
+  /* ---------- tarifa general de cobro (por mensaje y por minuto) ---------- */
+  if (sub === 'billing' && m === 'GET') {
+    const g = await globalRates(env.DB)
+    return json({ ...g, fallback_minute_micro: fallbackMinuteMicro(env), reply_tokens: await platform.replyTokenStats(Date.now() - 30 * 86_400_000) })
+  }
+  if (sub === 'billing' && m === 'PUT') {
+    const tok = z.number().int().min(0).max(10_000_000).nullable()
+    const b = await readJson(request, z.object({ message_usd: usd.nullable(), minute_usd: usd.nullable(), included_in: tok.optional(), included_out: tok.optional() }))
+    await setGlobalRates(env.DB, {
+      message_micro: b.message_usd === null ? null : toMicro(b.message_usd),
+      minute_micro: b.minute_usd === null ? null : toMicro(b.minute_usd),
+      included_in: b.included_in,
+      included_out: b.included_out,
+    })
+    await audit('billing.rates_updated', null, b)
+    return json({ ok: true })
+  }
+
+  /* ---------- costo real de proveedores (para ver la ganancia) ---------- */
+  if (sub === 'provider-costs' && m === 'GET') {
+    const c = await providerCosts(env.DB)
+    const models = (await platform.models(false)).map((x) => ({ id: x.id, name: x.display_name, type: x.type, active: Boolean(x.active) }))
+    return json({ models, costs: c.models, voice_minute_micro: c.voice_minute_micro })
+  }
+  if (sub === 'provider-costs' && m === 'PUT') {
+    const per1m = z.object({ in_usd: usd, out_usd: usd })
+    const b = await readJson(request, z.object({ models: z.record(z.string().max(60), per1m.nullable()), voice_minute_usd: usd.nullable() }))
+    const models: Record<string, { in_per_1m_micro: number; out_per_1m_micro: number }> = {}
+    for (const [k, v] of Object.entries(b.models)) if (v) models[k] = { in_per_1m_micro: toMicro(v.in_usd), out_per_1m_micro: toMicro(v.out_usd) }
+    await setProviderCosts(env.DB, { models, voice_minute_micro: b.voice_minute_usd === null ? null : toMicro(b.voice_minute_usd) })
+    await audit('billing.provider_costs_updated', null, b)
+    return json({ ok: true })
+  }
+
   /* ---------- consumo ---------- */
   if ((sub === 'usage' || sub === 'usage.csv') && m === 'GET') {
     const period = /^\d{4}-\d{2}$/.test(url.searchParams.get('period') || '') ? url.searchParams.get('period')! : periodOf(Date.now())
     const tenantId = url.searchParams.get('tenant') || undefined
     const [from, to] = periodRange(period)
-    const rows = await platform.usageReport(from, to, tenantId)
+    const costs = await providerCosts(env.DB)
+    const rows = (await platform.usageReport(from, to, tenantId)).map((r) => ({ ...r, real_cost_micro: realCost(costs, r) }))
     if (sub === 'usage.csv') {
       await audit('usage.exported', tenantId ?? null, { period })
       const csv = toCsv([
-        ['periodo', 'cliente', 'slug', 'modelo', 'tipo', 'mensajes', 'tokens_entrada', 'tokens_salida', 'importe_usd', 'registros_estimados'],
-        ...rows.map((r) => [period, r.tenant_name, r.slug, r.model_id, r.model_type, r.messages, r.tokens_in, r.tokens_out, (r.cost_micro / 1e6).toFixed(4), r.estimated]),
+        ['periodo', 'cliente', 'slug', 'modelo', 'tipo', 'registros', 'mensajes_cobrados', 'minutos_voz', 'tokens_entrada', 'tokens_salida', 'cobrado_usd', 'costo_real_usd', 'ganancia_usd', 'costo_lista_tokens_usd', 'registros_estimados'],
+        ...rows.map((r) => [period, r.tenant_name, r.slug, r.model_id, r.model_type, r.messages, r.billed_messages, (r.voice_secs / 60).toFixed(2), r.tokens_in, r.tokens_out, (r.cost_micro / 1e6).toFixed(4), r.real_cost_micro == null ? '' : (r.real_cost_micro / 1e6).toFixed(4), r.real_cost_micro == null ? '' : ((r.cost_micro - r.real_cost_micro) / 1e6).toFixed(4), r.token_cost_known ? (r.token_cost_micro / 1e6).toFixed(4) : '', r.estimated]),
       ])
       return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="consumo-${period}.csv"` } })
     }
-    return json({ period, rows, daily: await platform.dailyTotals(from, to), statements: await platform.statements(period) })
+    return json({ period, rows, daily: await platform.dailyTotals(from, to), statements: await platform.statements(period), rates: { ...(await globalRates(env.DB)), fallback_minute_micro: fallbackMinuteMicro(env) } })
   }
   if (sub === 'statements/close' && m === 'POST') {
     const b = await readJson(request, z.object({ period: z.string().regex(/^\d{4}-\d{2}$/) }))
@@ -263,7 +313,20 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
       for (const r of mine) {
         const mo = await platform.model(r.model_id)
         const pr = mo ? await effectivePrice(platform, repo, mo, to - 1) : { in_per_1m: 0, out_per_1m: 0 }
-        lines.push({ model: mo?.display_name ?? r.model_id, type: r.model_type, tokens_in: r.tokens_in, tokens_out: r.tokens_out, in_per_1m_micro: pr.in_per_1m, out_per_1m_micro: pr.out_per_1m, cost_micro: r.cost_micro })
+        lines.push({
+          model: r.model_type === 'voice' ? 'Llamadas de voz' : (mo?.display_name ?? r.model_id),
+          type: r.model_type,
+          tokens_in: r.tokens_in,
+          tokens_out: r.tokens_out,
+          in_per_1m_micro: pr.in_per_1m,
+          out_per_1m_micro: pr.out_per_1m,
+          cost_micro: r.cost_micro,
+          // Cobro por unidad (si aplica): mensajes del chat y segundos de voz
+          billed_messages: r.billed_messages,
+          overage_micro: r.overage_micro,
+          voice_secs: r.voice_secs,
+          token_billed_micro: r.token_billed_micro,
+        })
       }
       await platform.upsertStatement({
         tenant_id: tid,

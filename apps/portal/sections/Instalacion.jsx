@@ -3,7 +3,29 @@ import { toast } from '../../shared/toast.jsx'
 import { CHAT_ORIGIN } from '../env.js'
 import { Field, PageHead, TestWidget, useAction } from './common.jsx'
 
-export const snippetFor = (key) => `<script src="${CHAT_ORIGIN}/widget.js" data-key="${key}" async></script>`
+export const snippetFor = (key) => `<script src="${CHAT_ORIGIN}/widget.js" data-key="${key}" data-chat="true" data-voice="true" async></script>`
+
+/** Explica cómo elegir chat, voz o ambos con los atributos del código */
+function WidgetModes() {
+  const modes = [
+    ['true', 'true', 'Chat con el ícono de llamar adentro.'],
+    ['true', 'false', 'Solo chat, sin ícono de llamar.'],
+    ['false', 'true', 'Solo voz: la burbuja es un teléfono que abre la llamada.'],
+  ]
+  return (
+    <div class="info" style="margin-top:14px">
+      <b>Elige qué muestra el widget</b> cambiando <code>data-chat</code> y <code>data-voice</code> en el código:
+      <ul style="margin:8px 0 0;padding-left:18px;line-height:1.8">
+        {modes.map(([chat, voice, text]) => (
+          <li key={chat + voice}>
+            <code>data-chat="{chat}" data-voice="{voice}"</code> → {text}
+          </li>
+        ))}
+      </ul>
+      <div class="small" style="margin-top:8px">Puedes usar el mismo código con valores distintos en cada página. La voz solo aparece si está activada en la sección Voz.</div>
+    </div>
+  )
+}
 
 const GUIDES = {
   html: ['HTML', ['Abre el archivo de tu página (o la plantilla que se repite en todas).', 'Pega el código justo antes de la etiqueta </body>.', 'Guarda y publica. La burbuja aparece en la esquina.']],
@@ -51,6 +73,7 @@ export default function Instalacion({ api, agent, agentId, go, me }) {
             <div class="card-title">Tu código</div>
             <div class="small muted" style="margin:4px 0 12px">Para el agente «{agent?.name}».</div>
             <Snippet widgetKey={agent?.widget_key} />
+            <WidgetModes />
             {me.user.role === 'owner' && (
               <div class="info" style="margin-top:14px">
                 El widget solo funciona en los dominios que autorices en <button class="link" style="color:inherit" onClick={() => go('seguridad')}>Seguridad</button>.

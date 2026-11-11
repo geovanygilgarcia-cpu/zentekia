@@ -15,6 +15,14 @@ export interface TenantRow {
   data_key_enc: string | null
   onboarded: number
   created_at: number
+  /** Precio especial por mensaje / por minuto (micro-USD); null = el general */
+  price_message_micro?: number | null
+  price_minute_micro?: number | null
+  /** Tokens incluidos por mensaje (especial del cliente); null = el general */
+  msg_included_in?: number | null
+  msg_included_out?: number | null
+  /** Precio general de reventa del cliente (JSON de ResalePrices) */
+  resale_json?: string | null
 }
 
 export interface UserRow {
@@ -45,7 +53,20 @@ export interface SessionRow {
   ip: string | null
 }
 
+/** Precios que el cliente cobra a SUS clientes (reventa). No cambia lo que paga a Zentekia.
+ *  Importes en micro-USD; tokens en número. null/ausente = no cobra eso (o sin límite, en los incluidos). */
+export interface ResalePrices {
+  message_micro?: number | null
+  minute_micro?: number | null
+  included_in?: number | null
+  included_out?: number | null
+  excess_in_per_1m_micro?: number | null
+  excess_out_per_1m_micro?: number | null
+}
+
 export interface AgentConfig {
+  /** Precio especial de reventa de este asistente (cada campo ausente = usa el general del cliente) */
+  resale?: ResalePrices
   tone?: string
   fallback_response?: string
   suggested_questions?: string[]
@@ -61,13 +82,39 @@ export interface AgentConfig {
   lead_criteria?: string
   /** Datos que el agente debe intentar pedir (nombre, teléfono, correo…) */
   lead_fields?: Array<'name' | 'phone' | 'email' | 'company'>
+  /** Datos extra que define el cliente (ej. «Colonia», «Presupuesto»); se piden igual y se anotan en el resumen */
+  lead_custom?: string[]
   /** Aviso por correo a los owners: 'hot' = solo calientes, 'warm' = calientes y tibios, 'off' = nunca */
   lead_alerts?: 'off' | 'hot' | 'warm'
   /** Canal de chat (texto). Por defecto activo; se puede apagar para un asistente solo de voz. */
   chat_enabled?: boolean
   /** Canal de voz (ElevenLabs Agents) */
   voice?: VoiceConfig
+  /** 'guide' = asistente Guía de Zentekia (explica el portal y ayuda a crear otros asistentes) */
+  kind?: 'guide'
+  /** Herramientas opcionales del asistente (sección Herramientas del portal) */
+  tools?: ToolsConfig
 }
+
+export type WebhookEvent = 'conversation.analyzed' | 'lead.detected' | 'handoff.requested'
+
+export interface ToolsConfig {
+  /** Prospectos: pide datos de contacto, califica la conversación y avisa por correo. Sin definir = activo (comportamiento anterior). */
+  leads?: { enabled?: boolean }
+  /** Pasar a una persona: el agente marca la conversación y se avisa al equipo */
+  handoff?: { enabled?: boolean; when?: string; message?: string; email?: boolean }
+  /** Webhook: manda eventos en JSON a otro sistema (CRM, Zapier, Make, n8n…) firmados con HMAC */
+  webhook?: { enabled?: boolean; url?: string; secret?: string; events?: WebhookEvent[]; last_status?: number | null; last_at?: number | null; last_error?: string | null }
+  /** Agendar citas: comparte la liga de tu calendario (Calendly, Cal.com, Google Calendar…) */
+  booking?: { enabled?: boolean; url?: string; when?: string }
+  /** Continuar por WhatsApp: comparte una liga wa.me con mensaje prellenado */
+  whatsapp?: { enabled?: boolean; number?: string; message?: string }
+  /** Enlaces útiles que el agente puede compartir (catálogo, precios, ubicación…) */
+  links?: { enabled?: boolean; items?: Array<{ label: string; url: string }> }
+}
+
+/** Prospectos es opcional; los asistentes anteriores lo traen activo */
+export const leadsEnabled = (cfg: AgentConfig) => cfg.tools?.leads?.enabled !== false
 
 /** ¿El asistente atiende por chat (texto)? */
 export const chatEnabled = (agent: Pick<AgentRow, 'config_json'>) => parseJson<AgentConfig>(agent.config_json, {}).chat_enabled !== false

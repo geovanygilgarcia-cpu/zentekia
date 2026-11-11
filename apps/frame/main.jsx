@@ -11,6 +11,10 @@ import './frame.css'
 const root = document.getElementById('root')
 const KEY = root.dataset.key
 const TURNSTILE = root.dataset.turnstile
+// El loader manda ?chat=false / ?voice=false cuando el sitio apagó un canal con data-chat / data-voice
+const QS = new URLSearchParams(location.search)
+const CHAT_OFF = QS.get('chat') === 'false'
+const VOICE_OFF = QS.get('voice') === 'false'
 
 const store = {
   get(k) {
@@ -282,8 +286,8 @@ function App() {
   const t = cfg.theme
   const closeFrame = window.parent !== window ? () => post({ type: 'zt:close' }) : null
   // Asistente solo de voz: el widget es directamente la pantalla de llamada
-  if (cfg.chat === false) {
-    if (!cfg.voice || cfg.suspended) return <div class="zt-fatal">{cfg.suspended ? cfg.suspended_message : 'Este asistente no está disponible por ahora.'}</div>
+  if (cfg.chat === false || CHAT_OFF) {
+    if (!cfg.voice || VOICE_OFF || cfg.suspended) return <div class="zt-fatal">{cfg.suspended ? cfg.suspended_message : 'Este asistente no está disponible por ahora.'}</div>
     return (
       <VoiceCall
         standalone
@@ -318,7 +322,7 @@ function App() {
         offline={!cfg.online}
         notice={!cfg.online ? t.offline_message : null}
         privacy={t.privacy_notice ? { text: t.privacy_notice, required: t.privacy_required, accepted, onAccept: () => { store.set('privacy', '1'); setAccepted(true) } } : null}
-        onCall={cfg.voice && !cfg.suspended && cfg.online && !(t.privacy_required && t.privacy_notice && !accepted) ? () => setCalling(true) : null}
+        onCall={cfg.voice && !VOICE_OFF && !cfg.suspended && cfg.online && !(t.privacy_required && t.privacy_notice && !accepted) ? () => setCalling(true) : null}
       />
       {calling && (
         <VoiceCall

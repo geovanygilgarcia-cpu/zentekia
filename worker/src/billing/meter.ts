@@ -11,6 +11,7 @@ import type { ModelRow, TenantRow } from '../db/types'
 import { periodOf, periodRange } from '../db/types'
 import { sendEmail } from '../lib/email'
 import { costMicro, effectivePrice, fmtUsd } from './pricing'
+import { overageMicro, tenantRates } from './rates'
 
 export async function monthSpend(repo: TenantRepo, at = Date.now()) {
   const [from, to] = periodRange(periodOf(at))
@@ -31,18 +32,45 @@ export async function recordUsage(
 ): Promise<number> {
   const platform = new PlatformRepo(env.DB)
   const price = await effectivePrice(platform, repo, u.model)
-  const cost = costMicro(u.tokensIn, u.tokensOut, price)
+  // Lo que costaría por tokens: se guarda siempre para comparar en el admin
+  const tokenCost = costMicro(u.tokensIn, u.tokensOut, price)
+  const kind = u.kind ?? 'chat'
+  // Con precio por mensaje: cada respuesta del asistente cuesta lo mismo y los
+  // resúmenes automáticos (análisis) van incluidos. Sin precio: se cobra por tokens como antes.
+  const rates = await tenantRates(env, tenant)
+  let cost = tokenCost
+  let billing: 'message' | 'included' | 'token' = 'token'
+  let version = price.version
+  let overage = 0
+  if (rates.message_micro != null) {
+    if (kind === 'chat') {
+      // Precio del mensaje + excedente si pasó los tokens incluidos
+      overage = overageMicro(rates, u.tokensIn, u.tokensOut, price)
+      cost = rates.message_micro + overage
+      billing = 'message'
+      version = `msg:${rates.message_micro}:${rates.message_source}${overage ? `+exc:${rates.included_in ?? '-'}/${rates.included_out ?? '-'}:${price.version}` : ''}`
+    } else {
+      cost = 0
+      billing = 'included'
+      version = `included:${kind}`
+    }
+  }
   await repo.insertLedger({
     message_id: u.messageId,
     conversation_id: u.conversationId,
     model_id: u.model.id,
     model_type: u.model.type,
-    kind: u.kind ?? 'chat',
+    kind,
     tokens_in: u.tokensIn,
     tokens_out: u.tokensOut,
     cost_micro: cost,
-    price_version: price.version,
+    price_version: version,
     estimated: u.estimated ? 1 : 0,
+    billing,
+    units: billing === 'message' ? 1 : null,
+    unit_price_micro: billing === 'message' ? rates.message_micro : null,
+    token_cost_micro: tokenCost,
+    overage_micro: overage || null,
   })
   await checkThresholds(env, repo, tenant)
   return cost

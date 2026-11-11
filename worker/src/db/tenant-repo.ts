@@ -123,8 +123,8 @@ export class TenantRepo {
   tenant() {
     return this.q('SELECT * FROM tenants WHERE id = ?', this.tenantId).first<TenantRow>()
   }
-  async updateSettings(f: { retention_days?: number; onboarded?: number; fallback_to_hosted?: number; name?: string }) {
-    const { sets, vals } = setClause(f, ['retention_days', 'onboarded', 'fallback_to_hosted', 'name'])
+  async updateSettings(f: { retention_days?: number; onboarded?: number; fallback_to_hosted?: number; name?: string; resale_json?: string | null }) {
+    const { sets, vals } = setClause(f, ['retention_days', 'onboarded', 'fallback_to_hosted', 'name', 'resale_json'])
     if (!sets.length) return
     await this.q(`UPDATE tenants SET ${sets.join(', ')} WHERE id = ?`, ...vals, this.tenantId).run()
   }
@@ -449,13 +449,22 @@ export class TenantRepo {
       this.db.prepare('DELETE FROM conversations WHERE tenant_id = ? AND last_message_at < ?').bind(this.tenantId, cutoff),
     ])
   }
-  exportMessages(from: number, to: number) {
+  /** Mensajes del periodo; opcionalmente de un solo agente y canal */
+  exportMessages(from: number, to: number, agentId?: string, channel?: 'chat' | 'voice') {
+    const extra: string[] = []
+    const vals: unknown[] = []
+    if (agentId) {
+      extra.push('c.agent_id = ?')
+      vals.push(agentId)
+    }
+    if (channel === 'voice') extra.push("c.channel = 'voice'")
+    if (channel === 'chat') extra.push("(c.channel IS NULL OR c.channel <> 'voice')")
     return this.q(
       `SELECT c.id AS conversation_id, a.name AS agent, c.origin, m.role, m.content, m.created_at
        FROM messages m JOIN conversations c ON c.id = m.conversation_id AND c.tenant_id = m.tenant_id
        LEFT JOIN agents a ON a.id = c.agent_id AND a.tenant_id = c.tenant_id
-       WHERE m.tenant_id = ? AND m.created_at >= ? AND m.created_at < ? ORDER BY c.id, m.created_at LIMIT 50000`,
-      this.tenantId, from, to,
+       WHERE m.tenant_id = ? AND m.created_at >= ? AND m.created_at < ?${extra.map((x) => ' AND ' + x).join('')} ORDER BY c.id, m.created_at LIMIT 50000`,
+      this.tenantId, from, to, ...vals,
     ).all<{ conversation_id: string; agent: string | null; origin: string | null; role: string; content: string; created_at: number }>().then((r) => r.results)
   }
   avgTokensPerConversation(since: number) {
@@ -467,11 +476,32 @@ export class TenantRepo {
   }
 
   /* ---------- consumo ---------- */
-  async insertLedger(l: { message_id: string | null; conversation_id: string | null; model_id: string; model_type: string; kind: string; tokens_in: number; tokens_out: number; cost_micro: number; price_version: string; estimated: number }) {
+  async insertLedger(l: {
+    message_id: string | null
+    conversation_id: string | null
+    model_id: string
+    model_type: string
+    kind: string
+    tokens_in: number
+    tokens_out: number
+    cost_micro: number
+    price_version: string
+    estimated: number
+    /** message · minute · token · included */
+    billing?: string | null
+    /** mensajes: 1 · voz: segundos */
+    units?: number | null
+    unit_price_micro?: number | null
+    /** lo que habría costado por tokens (referencia para el admin) */
+    token_cost_micro?: number | null
+    /** parte del importe que es excedente de tokens */
+    overage_micro?: number | null
+  }) {
     await this.q(
-      `INSERT INTO usage_ledger (id, tenant_id, message_id, conversation_id, model_id, model_type, kind, tokens_in, tokens_out, cost_micro, price_version, estimated, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO usage_ledger (id, tenant_id, message_id, conversation_id, model_id, model_type, kind, tokens_in, tokens_out, cost_micro, price_version, estimated, created_at, billing, units, unit_price_micro, token_cost_micro, overage_micro)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id(), this.tenantId, l.message_id, l.conversation_id, l.model_id, l.model_type, l.kind, l.tokens_in, l.tokens_out, l.cost_micro, l.price_version, l.estimated, Date.now(),
+      l.billing ?? null, l.units ?? null, l.unit_price_micro ?? null, l.token_cost_micro ?? null, l.overage_micro ?? null,
     ).run()
   }
   spendBetween(from: number, to: number) {
@@ -489,10 +519,53 @@ export class TenantRepo {
   }
   usageByModel(from: number, to: number) {
     return this.q(
-      `SELECT model_id, model_type, SUM(tokens_in) AS tin, SUM(tokens_out) AS tout, SUM(cost_micro) AS cost, COUNT(*) AS n
+      `SELECT model_id, model_type, SUM(tokens_in) AS tin, SUM(tokens_out) AS tout, SUM(cost_micro) AS cost, COUNT(*) AS n,
+         SUM(CASE WHEN kind = 'chat' THEN 1 ELSE 0 END) AS replies,
+         SUM(CASE WHEN billing = 'message' THEN COALESCE(units, 1) ELSE 0 END) AS billed_messages,
+         COALESCE(SUM(overage_micro), 0) AS overage,
+         SUM(CASE WHEN overage_micro > 0 THEN 1 ELSE 0 END) AS overage_messages,
+         SUM(CASE WHEN model_type <> 'voice' THEN 0
+                  WHEN units IS NOT NULL THEN units
+                  WHEN INSTR(price_version, '/min:') > 0 THEN CAST(REPLACE(SUBSTR(price_version, INSTR(price_version, '/min:') + 5), 's', '') AS INTEGER)
+                  ELSE 0 END) AS voice_secs
        FROM usage_ledger WHERE tenant_id = ? AND created_at >= ? AND created_at < ? GROUP BY model_id, model_type`,
       this.tenantId, from, to,
-    ).all<{ model_id: string; model_type: string; tin: number; tout: number; cost: number; n: number }>().then((r) => r.results)
+    ).all<{ model_id: string; model_type: string; tin: number; tout: number; cost: number; n: number; replies: number; billed_messages: number; overage: number; overage_messages: number; voice_secs: number }>().then((r) => r.results)
+  }
+  /** Consumo de un asistente en un periodo, para calcular lo que el cliente cobra en reventa.
+   *  ex_in / ex_out = tokens arriba de lo incluido, sumados respuesta por respuesta. */
+  agentResaleUsage(agentId: string, from: number, to: number, incIn: number | null, incOut: number | null) {
+    return this.q(
+      `SELECT
+         SUM(CASE WHEN l.kind = 'chat' THEN 1 ELSE 0 END) AS msgs,
+         SUM(CASE WHEN l.kind = 'chat' AND ? IS NOT NULL THEN MAX(0, l.tokens_in - ?) ELSE 0 END) AS ex_in,
+         SUM(CASE WHEN l.kind = 'chat' AND ? IS NOT NULL THEN MAX(0, l.tokens_out - ?) ELSE 0 END) AS ex_out,
+         SUM(CASE WHEN l.model_type <> 'voice' THEN 0
+                  WHEN l.units IS NOT NULL THEN l.units
+                  WHEN INSTR(l.price_version, '/min:') > 0 THEN CAST(REPLACE(SUBSTR(l.price_version, INSTR(l.price_version, '/min:') + 5), 's', '') AS INTEGER)
+                  ELSE 0 END) AS voice_secs,
+         SUM(l.tokens_in) AS tokens_in, SUM(l.tokens_out) AS tokens_out,
+         SUM(l.cost_micro) AS paid
+       FROM usage_ledger l JOIN conversations c ON c.id = l.conversation_id AND c.tenant_id = l.tenant_id
+       WHERE l.tenant_id = ? AND c.agent_id = ? AND l.created_at >= ? AND l.created_at < ?`,
+      incIn, incIn ?? 0, incOut, incOut ?? 0, this.tenantId, agentId, from, to,
+    ).first<{ msgs: number | null; ex_in: number | null; ex_out: number | null; voice_secs: number | null; tokens_in: number | null; tokens_out: number | null; paid: number | null }>()
+  }
+  /** Tokens promedio por respuesta de este cliente (para elegir sus tokens incluidos) */
+  replyTokenStats(since: number) {
+    return this.q(
+      `SELECT COUNT(*) AS n, ROUND(AVG(tokens_in)) AS avg_in, ROUND(AVG(tokens_out)) AS avg_out, MAX(tokens_in) AS max_in, MAX(tokens_out) AS max_out
+       FROM usage_ledger WHERE tenant_id = ? AND kind = 'chat' AND created_at >= ?`,
+      this.tenantId, since,
+    ).first<{ n: number; avg_in: number | null; avg_out: number | null; max_in: number | null; max_out: number | null }>()
+  }
+  /** Respuestas del asistente por conversación (para la calculadora del portal) */
+  avgRepliesPerConversation(since: number) {
+    return this.q(
+      `SELECT COUNT(DISTINCT conversation_id) AS convs, COUNT(*) AS replies
+       FROM usage_ledger WHERE tenant_id = ? AND created_at >= ? AND kind = 'chat' AND conversation_id IS NOT NULL`,
+      this.tenantId, since,
+    ).first<{ convs: number; replies: number }>()
   }
   statements() {
     return this.q("SELECT * FROM statements WHERE tenant_id = ? AND status != 'draft' ORDER BY period DESC", this.tenantId).all<StatementRow>().then((r) => r.results)

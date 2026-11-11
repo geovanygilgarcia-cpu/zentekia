@@ -13,7 +13,8 @@ import { TenantRepo } from '../db/tenant-repo'
 import type { AgentRow, TenantRow, VoiceCallRow } from '../db/types'
 import { budgetAllows, checkThresholds } from '../billing/meter'
 import { retrieve } from '../rag/kb'
-import { conversationToken, getConversation, type ElConversation, voiceAvailable, voiceCfg, voiceMicroPerSecond } from '../lib/elevenlabs'
+import { conversationToken, getConversation, type ElConversation, voiceAvailable, voiceCfg } from '../lib/elevenlabs'
+import { tenantRates, voiceCost } from '../billing/rates'
 import { fail, json, readJson } from '../lib/http'
 import { analyzeConversation } from '../leads/analyze'
 import { hit } from '../lib/ratelimit'
@@ -143,9 +144,10 @@ async function writeCall(env: Env, tenant: TenantRow, repo: TenantRepo, call: Vo
   await repo.endConversation(convId, conv.metadata.termination_reason?.toLowerCase().includes('end_call') ? 'agent' : 'visitor')
   await repo.markVoiceCall(call.id, 'saved', convId)
 
-  // Consumo: segundos de llamada × precio por minuto de la plataforma
+  // Consumo: segundos de llamada × precio por minuto (especial del cliente o el general)
   const secs = Math.max(0, Math.round(conv.metadata.call_duration_secs || 0))
   if (secs > 0) {
+    const rates = await tenantRates(env, tenant)
     await repo.insertLedger({
       message_id: null,
       conversation_id: convId,
@@ -155,9 +157,14 @@ async function writeCall(env: Env, tenant: TenantRow, repo: TenantRepo, call: Vo
       // Los tokens quedan en 0 para no mezclar segundos con tokens en los totales; la duración está en price_version
       tokens_in: 0,
       tokens_out: 0,
-      cost_micro: secs * voiceMicroPerSecond(env),
-      price_version: `voice:${env.VOICE_PRICE_PER_MIN || '0.15'}/min:${secs}s`,
+      cost_micro: voiceCost(secs, rates.minute_micro),
+      price_version: `min:${rates.minute_micro}:${rates.minute_source}:${secs}s`,
       estimated: 0,
+      billing: 'minute',
+      units: secs,
+      unit_price_micro: rates.minute_micro,
+      // La voz no tiene costo en tokens: ElevenLabs se lo cobra a la cuenta de la plataforma aparte
+      token_cost_micro: null,
     })
     await checkThresholds(env, repo, tenant).catch(() => {})
   }

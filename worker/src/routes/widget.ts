@@ -24,6 +24,7 @@ import { resolveModel, type Resolved } from '../models/router'
 import { retrieve } from '../rag/kb'
 import { chatOrigin, normalizeOrigin, portalOrigin, portalUrl } from '../lib/hosts'
 import { analyzeConversation } from '../leads/analyze'
+import { onHandoff } from '../tools'
 import { clientIp, fail, json, randomToken, readJson, SECURITY_HEADERS } from '../lib/http'
 import { hit } from '../lib/ratelimit'
 import { mergedTheme, publicConfig, withinHours } from '../widget-theme'
@@ -313,7 +314,7 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
 
   const run = async () => {
     await write({ type: 'meta', conversation_id: cid, message_id: assistantId })
-    const st: { full: string; usage: { in: number; out: number } | null; resolved: Resolved | null; ended: boolean } = { full: '', usage: null, resolved: null, ended: false }
+    const st: { full: string; usage: { in: number; out: number } | null; resolved: Resolved | null; ended: boolean; handoff: boolean } = { full: '', usage: null, resolved: null, ended: false, handoff: false }
     const attempt = async (forceHosted: boolean) => {
       const r = await resolveModel(env, repo, tenant, agent, forceHosted)
       st.resolved = r
@@ -332,6 +333,7 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
       }
       await emit(filter.flush())
       st.ended = autoEnd && filter.ended
+      st.handoff = filter.handoff
     }
     const inputEstimate = () => estimateTokens(system + history.map((h) => h.content).join(' '))
     try {
@@ -355,6 +357,7 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
       if (st.ended && (await repo.endConversation(cid, 'agent'))) {
         ctx.waitUntil(analyzeConversation(env, tenant, repo, cid, { portalBase: portalUrl(env, new URL(request.url), tenant.slug) }).catch((e) => console.error('analysis', e)))
       }
+      if (st.handoff) ctx.waitUntil(onHandoff(env, tenant, repo, agent, cid, portalUrl(env, new URL(request.url), tenant.slug)).catch((e) => console.error('handoff', e)))
       await write({ type: 'done', message_id: assistantId, sources: showSources ? sources : [], ended: st.ended })
     } catch (e) {
       await notifyOwner(repo, e)
@@ -381,28 +384,39 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
 
 const GOODBYE: Record<string, string> = { es: 'Gracias por escribirnos. ¡Hasta pronto!', en: 'Thanks for reaching out. Goodbye!', pt: 'Obrigado pelo contato. Até logo!' }
 
-/** Quita la marca [FINALIZAR] del texto que va saliendo; guarda un pedazo si podría ser el inicio de la marca */
+/** Marcas de herramientas que escribe el modelo: [FINALIZAR] cierra el chat, [HUMANO] pide a una persona */
+const MARK_RE = /\[\s*(finalizar|humano)\s*\]/i
+
+/** Quita las marcas del texto que va saliendo; guarda un pedazo si podría ser el inicio de una marca */
 export class EndMarkFilter {
   ended = false
+  handoff = false
   private pending = ''
   push(text: string): string {
     if (this.ended) return ''
-    const buf = this.pending + text
+    let buf = this.pending + text
     this.pending = ''
-    const m = END_RE.exec(buf)
-    if (m) {
-      this.ended = true
-      return buf.slice(0, m.index).replace(/\s+$/, '')
+    let out = ''
+    for (;;) {
+      const m = MARK_RE.exec(buf)
+      if (!m) break
+      out += buf.slice(0, m.index)
+      if (m[1]!.toLowerCase() === 'finalizar') {
+        this.ended = true
+        return out.replace(/\s+$/, '')
+      }
+      this.handoff = true
+      buf = buf.slice(m.index + m[0].length)
     }
     const open = buf.lastIndexOf('[')
     if (open >= 0 && !buf.includes(']', open) && buf.length - open <= 16) {
       const tail = buf.slice(open).replace(/\s+/g, '').toLowerCase()
-      if ('[finalizar'.startsWith(tail)) {
+      if ('[finalizar'.startsWith(tail) || '[humano'.startsWith(tail)) {
         this.pending = buf.slice(open)
-        return buf.slice(0, open)
+        return out + buf.slice(0, open)
       }
     }
-    return buf
+    return out + buf
   }
   flush(): string {
     const p = this.pending

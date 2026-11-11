@@ -268,7 +268,9 @@ export function fakeProvider(id: string): ModelProvider {
       const ctx = fuentes.length ? ` (usé la base de conocimiento: ${fuentes.join(', ')})` : ''
       // Con la herramienta de finalizar activa, «adiós» simula que el modelo cierra (marca partida a propósito)
       const close = /adi[oó]s/i.test(q) && req.system.includes('[HERRAMIENTA: FINALIZAR')
-      const text = `Respuesta simulada de ${id}${ctx}: recibí «${q.slice(0, 60)}».` + (close ? '\n[FINAL' + 'IZAR]' : '')
+      // Con «pasar a una persona» activa, «una persona» simula que el modelo pide ayuda humana
+      const human = /una persona/i.test(q) && req.system.includes('[HERRAMIENTA: PASAR A UNA PERSONA]')
+      const text = `Respuesta simulada de ${id}${ctx}: recibí «${q.slice(0, 60)}».` + (close ? '\n[FINAL' + 'IZAR]' : '') + (human ? '\n[HUM' + 'ANO]' : '')
       for (const w of close ? [...(text.split('[FINAL')[0]!.match(/\S+\s*/g) || []), '[FINAL', 'IZAR]'] : text.match(/\S+\s*/g) || []) yield { type: 'delta', text: w }
       yield { type: 'usage', input_tokens: Math.ceil((req.system.length + q.length) / 4), output_tokens: Math.ceil(text.length / 4) }
     },

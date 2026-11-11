@@ -9,6 +9,7 @@ import { HOSTED_DEFAULT_MODEL } from '../db/seed'
 import type { TenantRow } from '../db/types'
 import { DEFAULT_THEME } from '../widget-theme'
 import { PRAKTICALL_AGENTS, PRAKTICALL_WIDGET } from '../templates/prakticall'
+import { GUIDE_NAME, GUIDE_PROMPT, GUIDE_SUGGESTED, guideWelcome } from '../templates/guia'
 import { portalUrl } from './hosts'
 import { sha256Hex, randomToken } from './http'
 import { sendEmail } from './email'
@@ -68,7 +69,7 @@ export async function provisionTenant(env: Env, url: URL, n: NewTenant) {
   const tenant = (await platform.tenantById(tenantId))!
   const repo = new TenantRepo(env.DB, tenantId)
 
-  const agents: { name: string; prompt: string; welcome: string; suggested: string[] }[] = []
+  const agents: { name: string; prompt: string; welcome: string; suggested: string[]; extra?: Record<string, unknown> }[] = []
   if (n.importPrakticall) {
     const legacy = await platform.legacyPrompts()
     for (const p of PRAKTICALL_AGENTS) {
@@ -76,7 +77,15 @@ export async function provisionTenant(env: Env, url: URL, n: NewTenant) {
       agents.push({ name: w?.name ?? p.name, prompt: legacy.get(p.agent) ?? p.content, welcome: w?.welcome ?? '', suggested: w?.suggested ?? [] })
     }
   }
-  if (!agents.length) agents.push({ name: `Asistente ${n.name}`, prompt: '', welcome: `Hola, soy el asistente de ${n.name}. ¿En qué te ayudo?`, suggested: [] })
+  // Cuenta nueva: nace solo con la Guía, que explica el portal y ayuda a crear los demás asistentes
+  if (!agents.length)
+    agents.push({
+      name: GUIDE_NAME,
+      prompt: GUIDE_PROMPT,
+      welcome: guideWelcome(n.name),
+      suggested: GUIDE_SUGGESTED,
+      extra: { kind: 'guide', tone: 'claro, paciente y práctico', business_description: 'Zentekia es la plataforma donde este negocio crea y administra sus asistentes virtuales.', tools: { leads: { enabled: false } } },
+    })
 
   for (const a of agents) {
     const agentId = await repo.createAgent({
@@ -87,7 +96,7 @@ export async function provisionTenant(env: Env, url: URL, n: NewTenant) {
       temperature: 0.4,
       model_id: HOSTED_DEFAULT_MODEL,
       provider_key_id: null,
-      config_json: JSON.stringify({ suggested_questions: a.suggested, business_name: n.name, tone: 'amable y profesional' }),
+      config_json: JSON.stringify({ suggested_questions: a.suggested, business_name: n.name, tone: 'amable y profesional', ...a.extra }),
     })
     await repo.createWidget(agentId, newWidgetKey(), JSON.stringify({ assistant_name: a.name.split(' · ').pop() || a.name, primary: DEFAULT_THEME.primary }), [])
   }

@@ -267,7 +267,7 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS ix_voice_pending ON voice_calls(status, created_at)`,
 ]
 
-const SCHEMA_VERSION = '4'
+const SCHEMA_VERSION = '7'
 
 let ready: Promise<void> | null = null
 
@@ -284,6 +284,9 @@ export function ensureSchema(db: D1Database): Promise<void> {
       await migrateV2(db)
       await migrateV3(db)
       await migrateV4(db)
+      await migrateV5(db)
+      await migrateV6(db)
+      await migrateV7(db)
       await seedModels(db)
       await db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema', ?)").bind(SCHEMA_VERSION).run()
     })().catch((e) => {
@@ -346,6 +349,46 @@ async function migrateV4(db: D1Database) {
   }
   await db.prepare('CREATE INDEX IF NOT EXISTS ix_conv_lead ON conversations(tenant_id, lead_status, last_message_at DESC)').run()
   await db.prepare('CREATE INDEX IF NOT EXISTS ix_conv_pending ON conversations(analyzed_at, last_message_at)').run()
+}
+
+/** v5: cobro por mensaje (chat) y por minuto (voz).
+ *  - tenants.price_*_micro: precio especial del cliente (null = usa el general, guardado en meta).
+ *  - usage_ledger: qué se cobró (billing), cuántas unidades (1 mensaje o N segundos), a qué precio,
+ *    y cuánto habría costado por tokens (para comparar en el admin). */
+async function migrateV5(db: D1Database) {
+  const tcols = await db.prepare('PRAGMA table_info(tenants)').all<{ name: string }>()
+  const th = new Set(tcols.results.map((c) => c.name))
+  for (const name of ['price_message_micro', 'price_minute_micro']) {
+    if (!th.has(name)) await db.prepare(`ALTER TABLE tenants ADD COLUMN ${name} INTEGER`).run()
+  }
+  const lcols = await db.prepare('PRAGMA table_info(usage_ledger)').all<{ name: string }>()
+  const lh = new Set(lcols.results.map((c) => c.name))
+  const add: Array<[string, string]> = [
+    ['billing', 'TEXT'], // message · minute · token · included
+    ['units', 'INTEGER'], // mensajes: 1 · voz: segundos
+    ['unit_price_micro', 'INTEGER'], // por mensaje o por minuto
+    ['token_cost_micro', 'INTEGER'], // lo que habría costado por tokens
+  ]
+  for (const [name, type] of add) {
+    if (!lh.has(name)) await db.prepare(`ALTER TABLE usage_ledger ADD COLUMN ${name} ${type}`).run()
+  }
+}
+
+/** v6: tokens incluidos por mensaje (especial del cliente; null = el general) y excedente cobrado */
+async function migrateV6(db: D1Database) {
+  const tcols = await db.prepare('PRAGMA table_info(tenants)').all<{ name: string }>()
+  const th = new Set(tcols.results.map((c) => c.name))
+  for (const name of ['msg_included_in', 'msg_included_out']) {
+    if (!th.has(name)) await db.prepare(`ALTER TABLE tenants ADD COLUMN ${name} INTEGER`).run()
+  }
+  const lcols = await db.prepare('PRAGMA table_info(usage_ledger)').all<{ name: string }>()
+  if (!lcols.results.some((c) => c.name === 'overage_micro')) await db.prepare('ALTER TABLE usage_ledger ADD COLUMN overage_micro INTEGER').run()
+}
+
+/** v7: precios de reventa del cliente (lo que él cobra a sus clientes) */
+async function migrateV7(db: D1Database) {
+  const tcols = await db.prepare('PRAGMA table_info(tenants)').all<{ name: string }>()
+  if (!tcols.results.some((c) => c.name === 'resale_json')) await db.prepare('ALTER TABLE tenants ADD COLUMN resale_json TEXT').run()
 }
 
 async function seedModels(db: D1Database) {
