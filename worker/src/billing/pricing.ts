@@ -1,7 +1,7 @@
 /*
   Precios por token.
     costo_mensaje = tokens_in × precio_in + tokens_out × precio_out
-  - Modelo hosted (Qwen de Zentekia): precio = tarifa del modelo (incluye inferencia + margen).
+  - Modelo hosted (Workers AI de Zentekia): precio = tarifa del modelo (incluye inferencia + margen).
   - Modelo BYOK: precio = fee de plataforma (el proveedor le cobra aparte al cliente).
   - Si el cliente tiene override vigente, se usa (precios propios o % de descuento).
   - Cada registro guarda la versión de tarifa usada, así un cambio de precio no altera el histórico.

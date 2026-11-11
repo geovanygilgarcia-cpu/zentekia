@@ -1,12 +1,12 @@
 /*
   Model router: elige el adaptador según la configuración del agente del cliente,
-  descifra la API key solo en memoria y aplica el respaldo a Qwen hosted si el cliente lo activó.
+  descifra la API key solo en memoria y aplica el respaldo a los modelos hosted (ver HOSTED_FALLBACKS).
 */
 import type { Env } from '../env'
 import { decryptForTenant } from '../auth/crypto'
 import { PlatformRepo } from '../db/platform-repo'
 import type { TenantRepo } from '../db/tenant-repo'
-import { HOSTED_DEFAULT_MODEL } from '../db/seed'
+import { HOSTED_DEFAULT_MODEL, HOSTED_FALLBACKS, RETIRED_HOSTED } from '../db/seed'
 import { parseJson, type AgentRow, type ModelRow, type TenantRow } from '../db/types'
 import { anthropic, fakeProvider, openaiLike, workersAi } from './adapters'
 import { ProviderError, type Credentials, type ModelProvider } from './provider'
@@ -22,7 +22,7 @@ export function providerFor(env: Env, p: ModelRow['provider']): ModelProvider {
   const fake = env.DEV_FAKE_AI === 'true'
   switch (p) {
     case 'workers-ai':
-      return fake ? fakeProvider('qwen') : workersAi(env)
+      return fake ? fakeProvider('workers-ai') : workersAi(env)
     case 'anthropic':
       return fake ? fakeProvider('claude') : anthropic()
     case 'openai':
@@ -32,15 +32,27 @@ export function providerFor(env: Env, p: ModelRow['provider']): ModelProvider {
   }
 }
 
+/** Modelos hosted a probar después de que `failedId` falló (sin repetir el que falló) */
+export function hostedFallbacksAfter(failedId: string): string[] {
+  return HOSTED_FALLBACKS.filter((id) => id !== failedId)
+}
+
 export function enabledModels(tenant: TenantRow): string[] {
   return parseJson<string[]>(tenant.enabled_models, [])
 }
 
-export async function resolveModel(env: Env, repo: TenantRepo, tenant: TenantRow, agent: AgentRow, forceHosted = false): Promise<Resolved> {
+/**
+ * Elige el modelo del agente.
+ * - forceHosted: ignora el modelo del agente y usa el hosted por defecto (respaldo de BYOK y análisis).
+ * - hostedId: usa ese modelo hosted (cadena de respaldo cuando un hosted falla).
+ */
+export async function resolveModel(env: Env, repo: TenantRepo, tenant: TenantRow, agent: AgentRow, forceHosted = false, hostedId?: string): Promise<Resolved> {
   const platform = new PlatformRepo(env.DB)
   const enabled = enabledModels(tenant)
-  let model = forceHosted ? null : await platform.model(agent.model_id)
-  if (model && (!model.active || (enabled.length && !enabled.includes(model.id)))) model = null
+  const wanted = hostedId ?? (forceHosted ? null : RETIRED_HOSTED[agent.model_id] ?? agent.model_id)
+  let model = wanted ? await platform.model(wanted) : null
+  if (model && !hostedId && (!model.active || (enabled.length && !enabled.includes(model.id)))) model = null
+  if (model && hostedId && (!model.active || model.type !== 'hosted')) model = null
   if (!model) {
     model = await platform.model(HOSTED_DEFAULT_MODEL)
     if (!model) throw new ProviderError('unavailable', 'No hay modelo disponible.')

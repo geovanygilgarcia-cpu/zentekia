@@ -3,7 +3,7 @@
   Regla: toda tabla con datos de un cliente lleva tenant_id NOT NULL e índice compuesto.
   Importes en micro-USD (1 USD = 1,000,000) como enteros.
 */
-import { SEED_MODELS } from './seed'
+import { RETIRED_HOSTED, SEED_MODELS } from './seed'
 
 const DDL = [
   `CREATE TABLE IF NOT EXISTS tenants (
@@ -267,7 +267,7 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS ix_voice_pending ON voice_calls(status, created_at)`,
 ]
 
-const SCHEMA_VERSION = '7'
+const SCHEMA_VERSION = '8'
 
 let ready: Promise<void> | null = null
 
@@ -287,6 +287,7 @@ export function ensureSchema(db: D1Database): Promise<void> {
       await migrateV5(db)
       await migrateV6(db)
       await migrateV7(db)
+      await migrateV8(db)
       await seedModels(db)
       await db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema', ?)").bind(SCHEMA_VERSION).run()
     })().catch((e) => {
@@ -389,6 +390,45 @@ async function migrateV6(db: D1Database) {
 async function migrateV7(db: D1Database) {
   const tcols = await db.prepare('PRAGMA table_info(tenants)').all<{ name: string }>()
   if (!tcols.results.some((c) => c.name === 'resale_json')) await db.prepare('ALTER TABLE tenants ADD COLUMN resale_json TEXT').run()
+}
+
+/**
+ * v8: nuevos modelos hosted de Workers AI y retiro de Qwen3 30B (Cloudflare lo apaga el 20/11/2026).
+ * Solo actúa en bases que ya tienen modelos; en una instalación nueva lo hace seedModels.
+ */
+async function migrateV8(db: D1Database) {
+  const n = await db.prepare('SELECT COUNT(*) AS n FROM models').first<{ n: number }>()
+  if (!n || n.n === 0) return
+  const t = Date.now()
+  const stmts: D1PreparedStatement[] = []
+  for (const [i, m] of SEED_MODELS.entries()) {
+    if (m.type !== 'hosted') continue
+    const exists = await db.prepare('SELECT id FROM models WHERE id = ?').bind(m.id).first()
+    if (exists) continue
+    stmts.push(
+      db
+        .prepare('INSERT INTO models (id, provider, model_name, display_name, type, active, context_window, sort) VALUES (?, ?, ?, ?, ?, 1, ?, ?)')
+        .bind(m.id, m.provider, m.model_name, m.display_name, m.type, m.context_window, i),
+    )
+    stmts.push(
+      db
+        .prepare(
+          'INSERT INTO price_list (id, model_id, input_per_1m_micro, output_per_1m_micro, fee_input_per_1m_micro, fee_output_per_1m_micro, effective_from) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        )
+        .bind(crypto.randomUUID(), m.id, m.price[0], m.price[1], m.fee[0], m.fee[1], t),
+    )
+  }
+  for (const [old, next] of Object.entries(RETIRED_HOSTED)) {
+    stmts.push(db.prepare('UPDATE models SET active = 0 WHERE id = ?').bind(old))
+    stmts.push(db.prepare('UPDATE agents SET model_id = ? WHERE model_id = ?').bind(next, old))
+    // Clientes con lista de modelos permitidos: el reemplazo queda permitido en lugar del retirado
+    stmts.push(
+      db
+        .prepare(`UPDATE tenants SET enabled_models = REPLACE(enabled_models, ?, ?) WHERE enabled_models LIKE ?`)
+        .bind(JSON.stringify(old), JSON.stringify(next), `%${JSON.stringify(old)}%`),
+    )
+  }
+  if (stmts.length) await db.batch(stmts)
 }
 
 async function seedModels(db: D1Database) {

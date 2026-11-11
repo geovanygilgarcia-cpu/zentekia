@@ -22,7 +22,7 @@ Dentro de cada asistente, en el canal Chat, están estas secciones:
 - Agente: nombre, mensaje de bienvenida, tono, idioma, instrucciones (qué hace el negocio, qué responder y qué no), respuesta cuando no sabe algo, preguntas sugeridas y datos del negocio.
 - Conocimiento: documentos (PDF, Word, TXT, CSV), páginas web y texto libre que el asistente consulta para responder. Las páginas se vuelven a leer solas cada cierto tiempo.
 - Herramientas: acciones opcionales que se prenden o apagan por asistente: Prospectos, Finalizar conversación, Pasar a una persona, Agendar citas, Continuar por WhatsApp, Enlaces útiles y Webhook.
-- Modelo: qué inteligencia responde. Por defecto el modelo de Zentekia (Qwen); también se pueden conectar Claude, OpenAI o compatibles con la API key propia. Solo lo ve el propietario.
+- Modelo: qué inteligencia responde. Por defecto Gemma 4 de Zentekia (rápido); también hay DeepSeek V4.1 Flash (avanzado, para conversaciones más complejas) si Zentekia lo habilita para la cuenta, y se pueden conectar Claude, OpenAI o compatibles con la API key propia. Solo lo ve el propietario.
 - Widget: colores, nombre, logo, posición de la burbuja, aviso de privacidad, horario de atención y mensaje fuera de horario.
 - Instalación: una sola línea de código para pegar en el sitio web y los dominios donde puede funcionar. Los cambios del portal se aplican solos, sin reinstalar.
 - Conversaciones: el historial con resumen de cada plática, prospectos (caliente, tibio, frío), datos de contacto, seguimiento y exportación a CSV.

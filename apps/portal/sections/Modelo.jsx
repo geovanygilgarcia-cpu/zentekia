@@ -118,7 +118,7 @@ export function ModelPicker({ api, agentId, readOnly, onChanged }) {
                     </>
                   )}
                   {key && !needsKey && !readOnly && (
-                    <button type="button" class="link link-danger right" onClick={() => confirm('¿Borrar la llave? Los agentes que la usan regresarán a Qwen hosted.') && run(() => api.del(`keys/${key.id}`), 'Llave borrada').then(() => { models.reload(); agent.reload() })}>
+                    <button type="button" class="link link-danger right" onClick={() => confirm('¿Borrar la llave? Los agentes que la usan regresarán al modelo de Zentekia.') && run(() => api.del(`keys/${key.id}`), 'Llave borrada').then(() => { models.reload(); agent.reload() })}>
                       Borrar
                     </button>
                   )}
@@ -135,7 +135,7 @@ export function ModelPicker({ api, agentId, readOnly, onChanged }) {
         {m?.type === 'hosted' && (
           <div class="card">
             <div class="card-title">{m.name}</div>
-            <div class="small muted" style="margin-top:6px">Corre en la infraestructura de Zentekia. No necesitas API key: el precio por token ya incluye todo.</div>
+            <div class="small muted" style="margin-top:6px">Corre en la infraestructura de Zentekia. No necesitas API key: el precio por token ya incluye todo. Si este modelo se satura, el chat sigue respondiendo con otro modelo de Zentekia.</div>
           </div>
         )}
         <div class="card">
@@ -155,7 +155,7 @@ export function ModelPicker({ api, agentId, readOnly, onChanged }) {
           <div class="card">
             <label class="check" style="margin-top:0">
               <input type="checkbox" checked={d.fallback_to_hosted} onChange={(e) => run(() => api.put(`agents/${agentId}/model`, { model_id: current, fallback_to_hosted: e.target.checked }), 'Guardado').then(models.reload)} />
-              <span>Si tu proveedor falla, responder con Qwen hosted (se cobra según el modelo realmente usado).</span>
+              <span>Si tu proveedor falla, responder con el modelo de Zentekia (se cobra según el modelo realmente usado).</span>
             </label>
           </div>
         )}
