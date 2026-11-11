@@ -1,6 +1,6 @@
 /*
   Análisis de conversaciones: resumen + ¿es prospecto? + datos de contacto.
-  - Corre con Qwen hosted (barato y siempre disponible); el consumo se registra como kind 'analysis'.
+  - Corre con el modelo hosted por defecto (HOSTED_DEFAULT_MODEL: barato y siempre disponible); el consumo se registra como kind 'analysis'.
   - Los correos y teléfonos también se sacan con expresiones regulares, para no depender solo del modelo
     y para descartar datos que el modelo invente (solo cuenta lo que el visitante escribió).
   - Se dispara al cerrar una conversación (chat o llamada), por el cron con las que quedaron inactivas,

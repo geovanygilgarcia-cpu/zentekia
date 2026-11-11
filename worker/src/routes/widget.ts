@@ -20,7 +20,8 @@ import { chatEnabled, parseJson, periodOf, type AgentRow, type TenantRow, type W
 import { budgetAllows, checkThresholds, recordUsage } from '../billing/meter'
 import { buildSystem, END_RE } from '../models/context'
 import { estimateTokens, ProviderError, type ChatMessage } from '../models/provider'
-import { resolveModel, type Resolved } from '../models/router'
+import { hostedFallbacksAfter, resolveModel, type Resolved } from '../models/router'
+import { HOSTED_FALLBACKS } from '../db/seed'
 import { retrieve } from '../rag/kb'
 import { chatOrigin, normalizeOrigin, portalOrigin, portalUrl } from '../lib/hosts'
 import { analyzeConversation } from '../leads/analyze'
@@ -315,8 +316,8 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
   const run = async () => {
     await write({ type: 'meta', conversation_id: cid, message_id: assistantId })
     const st: { full: string; usage: { in: number; out: number } | null; resolved: Resolved | null; ended: boolean; handoff: boolean } = { full: '', usage: null, resolved: null, ended: false, handoff: false }
-    const attempt = async (forceHosted: boolean) => {
-      const r = await resolveModel(env, repo, tenant, agent, forceHosted)
+    const attempt = async (forceHosted: boolean, hostedId?: string) => {
+      const r = await resolveModel(env, repo, tenant, agent, forceHosted, hostedId)
       st.resolved = r
       // La marca [FINALIZAR] nunca llega al visitante: se detecta aunque venga partida en varios pedazos
       const filter = new EndMarkFilter()
@@ -340,11 +341,36 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
       try {
         await attempt(false)
       } catch (e) {
-        // Respaldo opcional a Qwen hosted solo si todavía no se mandó texto
-        if (!st.full && tenant.fallback_to_hosted && st.resolved?.model.type === 'byok') {
-          await notifyOwner(repo, e)
-          await attempt(true)
-        } else throw e
+        // Respaldo solo si todavía no se mandó texto al visitante:
+        // - modelo hosted saturado o retirado → se prueba el siguiente hosted (es infraestructura de Zentekia)
+        // - API key del cliente (BYOK) falló → modelos hosted, solo si el cliente activó el respaldo
+        const first = st.resolved
+        const chain =
+          st.full || !first
+            ? []
+            : first.model.type === 'hosted'
+              ? e instanceof ProviderError && e.retryable
+                ? hostedFallbacksAfter(first.model.id)
+                : []
+              : tenant.fallback_to_hosted
+                ? HOSTED_FALLBACKS
+                : []
+        if (!chain.length) throw e
+        if (first?.model.type === 'byok') await notifyOwner(repo, e)
+        else console.error(JSON.stringify({ level: 'warn', msg: 'hosted_fallback', tenant_id: repo.tenantId, model: first?.model.id, detail: (e as { detail?: string }).detail }))
+        let last: unknown = e
+        let ok = false
+        for (const id of chain) {
+          try {
+            await attempt(true, id)
+            ok = true
+            break
+          } catch (e2) {
+            last = e2
+            if (st.full) break // ya salió texto: no se puede reintentar con otro modelo
+          }
+        }
+        if (!ok) throw last
       }
       const r = st.resolved!
       const estimated = !st.usage

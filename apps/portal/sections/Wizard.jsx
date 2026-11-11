@@ -79,7 +79,7 @@ export default function Wizard({ api, agentId, agent, done, reload }) {
       )}
       {step === 3 && (
         <>
-          <p class="sub" style="margin:-8px 0 16px">Si no sabes cuál elegir, deja Qwen hosted by Zentekia: no necesitas API key.</p>
+          <p class="sub" style="margin:-8px 0 16px">Si no sabes cuál elegir, deja Gemma 4 · Zentekia: no necesitas API key.</p>
           <ModelPicker api={api} agentId={agentId} />
         </>
       )}

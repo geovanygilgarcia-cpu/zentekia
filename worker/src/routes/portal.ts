@@ -490,7 +490,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     owner()
     const k = await repo.providerKeyWithSecret(p.id!)
     if (!k) fail(404, 'not_found', 'Llave no encontrada.')
-    // Los agentes que usaban esa llave regresan a Qwen hosted
+    // Los agentes que usaban esa llave regresan al modelo hosted por defecto
     for (const a of await repo.listAgents()) {
       const mo = await platform.model(a.model_id)
       if (mo?.provider === k!.provider) await repo.updateAgent(a.id, { model_id: HOSTED_DEFAULT_MODEL, provider_key_id: null })

@@ -33,7 +33,17 @@ async function post(url: string, headers: Record<string, string>, body: unknown,
   return res
 }
 
-/* ---------------- Qwen hosted (Workers AI) ---------------- */
+/* ---------------- Modelos hosted (Workers AI) ---------------- */
+
+/**
+ * Opciones por familia de modelo para que contesten directo, sin "pensar" antes
+ * (el razonamiento hace el chat lento y gasta tokens de salida).
+ */
+export function workersAiOptions(model: string): Record<string, unknown> {
+  if (model.includes('gemma-4')) return { chat_template_kwargs: { enable_thinking: false } }
+  if (model.includes('deepseek-v4')) return { reasoning_effort: 'none' }
+  return {}
+}
 
 /** Quita bloques <think>…</think> aunque lleguen partidos entre trozos */
 export function thinkFilter() {
@@ -94,9 +104,14 @@ export function workersAi(env: Env): ModelProvider {
           stream: true,
           max_tokens: req.maxTokens,
           temperature: req.temperature,
+          ...workersAiOptions(req.model),
         } as never)) as unknown as ReadableStream<Uint8Array>
       } catch (e) {
-        throw new ProviderError('unavailable', 'Qwen hosted no está disponible en este momento.', true)
+        // Saturado, límite por minuto (429 / 3040) o modelo retirado (410 / 5028): se puede intentar con otro modelo
+        const detail = e instanceof Error ? e.message : String(e)
+        const err = new ProviderError('unavailable', 'El modelo de Zentekia no está disponible en este momento.', true)
+        ;(err as ProviderError & { detail?: string }).detail = `${req.model}: ${detail}`.slice(0, 300)
+        throw err
       }
       const filter = thinkFilter()
       let started = false
@@ -129,7 +144,7 @@ export function workersAi(env: Env): ModelProvider {
       if (rest) yield { type: 'delta', text: rest }
     },
     async testConnection(): Promise<TestResult> {
-      return env.AI ? { ok: true, message: 'Qwen hosted está disponible.' } : { ok: false, message: 'Falta el binding AI.' }
+      return env.AI ? { ok: true, message: 'El modelo de Zentekia está disponible.' } : { ok: false, message: 'Falta el binding AI.' }
     },
   }
 }
