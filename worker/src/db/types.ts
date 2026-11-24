@@ -23,6 +23,8 @@ export interface TenantRow {
   msg_included_out?: number | null
   /** Precio general de reventa del cliente (JSON de ResalePrices) */
   resale_json?: string | null
+  /** Productos activados (JSON de lib/products.ts): agentes virtuales y contact center con sus licencias */
+  products_json?: string | null
 }
 
 export interface UserRow {
@@ -92,6 +94,11 @@ export interface AgentConfig {
   voice?: VoiceConfig
   /** 'guide' = asistente Guía de Zentekia (explica el portal y ayuda a crear otros asistentes) */
   kind?: 'guide'
+  /**
+   * 'human' = canal del contact center sin IA: chat web o WhatsApp que entran directo a la cola de personas.
+   * Sin definir = asistente virtual con IA.
+   */
+  mode?: 'ai' | 'human'
   /** Herramientas opcionales del asistente (sección Herramientas del portal) */
   tools?: ToolsConfig
 }

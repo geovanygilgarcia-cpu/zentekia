@@ -31,7 +31,8 @@ import { checkWebhookUrl, newWebhookSecret, sendWebhook } from '../tools/webhook
 import type { ToolsConfig } from '../db/types'
 import { InboxRepo } from '../db/inbox-repo'
 import { ChannelRepo } from '../db/channel-repo'
-import { inboxReady, onAgentGone } from '../inbox/core'
+import { contactCenterOn, onAgentGone } from '../inbox/core'
+import { isLicensedRole, productsOf } from '../lib/products'
 
 const hex = z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'color en formato #RRGGBB')
 
@@ -214,6 +215,8 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
           name: a.name,
           model_id: a.model_id,
           kind: parseJson<AgentConfig>(a.config_json, {}).kind ?? null,
+          // 'human' = canal del contact center (sin IA)
+          mode: parseJson<AgentConfig>(a.config_json, {}).mode === 'human' ? 'human' : 'ai',
           created_at: a.created_at,
           conversations_30d: stats.find((x) => x.agent_id === a.id)?.n ?? 0,
           last_conversation_at: stats.find((x) => x.agent_id === a.id)?.last_at ?? null,
@@ -228,7 +231,8 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
       chat_origin: chatOrigin(env, url),
       can_hide_powered_by: PLANS[tenant.plan_id]?.canHidePoweredBy ?? false,
       voice_available: voiceAvailable(env),
-      inbox_ready: inboxReady(env),
+      inbox_ready: contactCenterOn(env, tenant),
+      products: productsOf(tenant),
     })
   }
   if (sub === 'alerts/read' && m === 'POST') {
@@ -273,6 +277,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
   // Asistente nuevo: nombre + tipo (plantilla con instrucciones base) + descripción opcional; herramientas apagadas
   if (sub === 'agents' && m === 'POST') {
     owner()
+    if (!productsOf(tenant).va) fail(403, 'no_product', 'Tu cuenta no tiene Agentes virtuales. Pídelos a Zentekia.')
     const b = await readJson(request, z.object({ name: z.string().trim().min(1).max(80), template: z.string().max(40).optional(), description: z.string().trim().max(2000).optional() }))
     const current = await repo.listAgents()
     if (current.length >= 10) fail(400, 'limit', 'Máximo 10 agentes por cliente.')
@@ -326,7 +331,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
       if (b.tools) cfg.tools = mergeTools(cfg.tools, b.tools)
       const h = cfg.tools?.handoff
       if (b.tools?.handoff && h?.enabled && h.mode === 'inbox') {
-        if (!inboxReady(env)) fail(400, 'inbox_unavailable', 'La bandeja todavía no está activa en este servidor. Usa «Avisar por correo» o pide a Zentekia que la active.')
+        if (!contactCenterOn(env, tenant)) fail(400, 'inbox_unavailable', 'Pasar a la Bandeja necesita el Contact Center. Usa «Avisar por correo» o pide a Zentekia que lo active.')
         if (h.queue_id && !(await new InboxRepo(env.DB, tenant.id).queue(h.queue_id))) fail(400, 'queue', 'La cola elegida ya no existe.')
       }
       await repo.updateAgent(a!.id, { name: b.name, welcome_message: b.welcome_message, language: b.language, system_prompt: b.system_prompt, temperature: b.temperature, config_json: JSON.stringify(cfg) })
@@ -985,7 +990,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     if (url.searchParams.get('format') === 'csv') {
       const csv = toCsv([
         ['periodo', 'concepto', 'tipo', 'mensajes_cobrados', 'minutos_voz', 'tokens_entrada', 'tokens_salida', 'importe_usd'],
-        ...lines.map((l) => [s!.period, l.model, l.type === 'voice' ? 'voz (por minuto)' : l.billed_messages ? 'chat (por mensaje)' : l.type === 'byok' ? 'fee de plataforma (BYOK)' : 'chat (por tokens)', l.billed_messages || 0, ((l.voice_secs || 0) / 60).toFixed(2), l.tokens_in, l.tokens_out, (l.cost_micro / 1e6).toFixed(4)]),
+        ...lines.map((l) => [s!.period, l.model, l.type === 'seats' ? 'licencias de agente humano' : l.type === 'voice' ? 'voz (por minuto)' : l.billed_messages ? 'chat (por mensaje)' : l.type === 'byok' ? 'fee de plataforma (BYOK)' : 'chat (por tokens)', l.billed_messages || 0, ((l.voice_secs || 0) / 60).toFixed(2), l.tokens_in, l.tokens_out, (l.cost_micro / 1e6).toFixed(4)]),
         [s!.period, 'TOTAL', '', '', '', s!.tokens_in, s!.tokens_out, (s!.total_micro / 1e6).toFixed(2)],
       ])
       return new Response(csv, { headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Disposition': `attachment; filename="estado-${tenant.slug}-${s!.period}.csv"` } })
@@ -994,21 +999,34 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
   }
 
   /* ---------- equipo ---------- */
+  // Licencias del contact center: cada agente o supervisor (activo o invitado) ocupa una
+  const seatInfo = async () => {
+    const pr = productsOf(tenant)
+    const used = (await repo.users()).filter((x) => isLicensedRole(x.role)).length
+    return { enabled: pr.cc, total: pr.cc_seats, used }
+  }
+  const needSeat = async (role: string, currentRole?: string) => {
+    if (!isLicensedRole(role) || (currentRole && isLicensedRole(currentRole))) return
+    const s = await seatInfo()
+    if (!s.enabled) fail(400, 'no_product', 'Los agentes y supervisores son del Contact Center, que no está activo en tu cuenta. Pídelo a Zentekia.')
+    if (s.used >= s.total) fail(400, 'no_seats', `Ya usas tus ${s.total} licencias de agente. Pide más a Zentekia o quita el acceso a alguien.`)
+  }
   if (sub === 'team' && m === 'GET') {
     owner()
-    return json({ users: await repo.users(), me: ctx!.user.id })
+    return json({ users: await repo.users(), me: ctx!.user.id, seats: await seatInfo(), products: productsOf(tenant) })
   }
   if (sub === 'team/invite' && m === 'POST') {
     owner()
     const b = await readJson(request, z.object({ email: z.string().trim().toLowerCase().email().max(200), role: z.enum(TEAM_ROLES) }))
     let u = await repo.userByEmail(b.email)
     if (u && u.status === 'active') fail(400, 'exists', 'Esa persona ya tiene acceso.')
+    await needSeat(b.role, u?.role)
     if (!u) {
       const id = crypto.randomUUID()
       await repo.createUser({ id, email: b.email, name: null, role: b.role })
       u = await repo.user(id)
     }
-    const inv = await createInvite(env, url, tenant, u!.id, b.email)
+    const inv = await createInvite(env, url, tenant, u!.id, b.email, isLicensedRole(b.role) || !productsOf(tenant).va ? 'cc' : 'portal')
     await audit('team.invited', { email: b.email, role: b.role })
     return json({ link: inv.link, emailed: inv.emailed })
   }
@@ -1020,6 +1038,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     if (u!.role === 'owner' && u!.status === 'active' && (await repo.ownerCount()) <= 1) fail(400, 'last_owner', 'Debe quedar al menos un owner.')
     if (m === 'PUT') {
       const b = await readJson(request, z.object({ role: z.enum(TEAM_ROLES) }))
+      await needSeat(b.role, u!.role)
       await repo.setUserRole(u!.id, b.role)
       await audit('team.role_changed', { user_id: u!.id, role: b.role })
       return json({ ok: true })

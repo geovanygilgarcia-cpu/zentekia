@@ -13,6 +13,7 @@ import { GUIDE_NAME, GUIDE_PROMPT, GUIDE_SUGGESTED, guideWelcome } from '../temp
 import { portalUrl } from './hosts'
 import { sha256Hex, randomToken } from './http'
 import { sendEmail } from './email'
+import { productsOf, type Products } from './products'
 
 const B62 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'
 export function newWidgetKey(): string {
@@ -20,7 +21,8 @@ export function newWidgetKey(): string {
   return 'pk_live_' + [...b].map((x) => B62[x % 62]).join('')
 }
 
-export async function createInvite(env: Env, url: URL, tenant: TenantRow, userId: string, email: string): Promise<{ link: string; emailed: boolean }> {
+/** app 'cc' = la liga abre el Contact Center (agentes humanos) en lugar del portal de agentes virtuales */
+export async function createInvite(env: Env, url: URL, tenant: TenantRow, userId: string, email: string, app: 'portal' | 'cc' = 'portal'): Promise<{ link: string; emailed: boolean }> {
   const token = randomToken(32)
   await new PlatformRepo(env.DB).insertOneTime({
     token_hash: await sha256Hex(token),
@@ -31,12 +33,13 @@ export async function createInvite(env: Env, url: URL, tenant: TenantRow, userId
     expires_at: Date.now() + 7 * 86_400_000,
   })
   // El token va en el fragmento (#): no viaja en logs de servidores ni en el Referer
-  const link = `${portalUrl(env, url, tenant.slug)}#/invitacion/${token}`
+  const link = `${portalUrl(env, url, tenant.slug)}${app === 'cc' ? 'cc/' : ''}#/invitacion/${token}`
+  const what = app === 'cc' ? `al Contact Center de ${tenant.name} para atender a sus clientes por chat y WhatsApp` : `al portal de ${tenant.name} para configurar tu agente de chat`
   const emailed = await sendEmail(
     env,
     [email],
     `Tu acceso a Zentekia · ${tenant.name}`,
-    `Hola,\n\nZentekia te dio acceso al portal de ${tenant.name} para configurar tu agente de chat.\n\nEntra aquí para crear tu contraseña (la liga vence en 7 días):\n${link}\n\nSi no esperabas este correo, ignóralo.`,
+    `Hola,\n\nZentekia te dio acceso ${what}.\n\nEntra aquí para crear tu contraseña (la liga vence en 7 días):\n${link}\n\nSi no esperabas este correo, ignóralo.`,
   )
   return { link, emailed }
 }
@@ -50,6 +53,7 @@ export interface NewTenant {
   limitBehavior: 'block' | 'allow'
   enabledModels: string[]
   importPrakticall: boolean
+  products?: Products
 }
 
 export async function provisionTenant(env: Env, url: URL, n: NewTenant) {
@@ -65,20 +69,24 @@ export async function provisionTenant(env: Env, url: URL, n: NewTenant) {
     enabled_models: JSON.stringify(n.enabledModels),
     data_key_enc: await newWrappedDataKey(env, tenantId),
     currency: 'USD',
+    products_json: n.products ? JSON.stringify(n.products) : null,
   })
   const tenant = (await platform.tenantById(tenantId))!
   const repo = new TenantRepo(env.DB, tenantId)
+  const pr = productsOf(tenant)
 
   const agents: { name: string; prompt: string; welcome: string; suggested: string[]; extra?: Record<string, unknown> }[] = []
-  if (n.importPrakticall) {
+  // Contact center: nace con un chat web que entra directo a la cola de personas (sin IA)
+  if (pr.cc) agents.push({ name: 'Chat web', prompt: '', welcome: `Hola, gracias por escribir a ${n.name}. ¿En qué te podemos ayudar?`, suggested: [], extra: { mode: 'human', tools: { leads: { enabled: false } } } })
+  if (pr.va && n.importPrakticall) {
     const legacy = await platform.legacyPrompts()
     for (const p of PRAKTICALL_AGENTS) {
       const w = PRAKTICALL_WIDGET[p.agent]
       agents.push({ name: w?.name ?? p.name, prompt: legacy.get(p.agent) ?? p.content, welcome: w?.welcome ?? '', suggested: w?.suggested ?? [] })
     }
   }
-  // Cuenta nueva: nace solo con la Guía, que explica el portal y ayuda a crear los demás asistentes
-  if (!agents.length)
+  // Agentes virtuales: la cuenta nace con la Guía, que explica el portal y ayuda a crear los demás asistentes
+  if (pr.va && !agents.some((a) => !a.extra || a.extra.mode !== 'human'))
     agents.push({
       name: GUIDE_NAME,
       prompt: GUIDE_PROMPT,
@@ -103,6 +111,6 @@ export async function provisionTenant(env: Env, url: URL, n: NewTenant) {
 
   const ownerId = crypto.randomUUID()
   await repo.createUser({ id: ownerId, email: n.ownerEmail, name: null, role: 'owner' })
-  const invite = await createInvite(env, url, tenant, ownerId, n.ownerEmail)
+  const invite = await createInvite(env, url, tenant, ownerId, n.ownerEmail, pr.va ? 'portal' : 'cc')
   return { tenant, invite }
 }

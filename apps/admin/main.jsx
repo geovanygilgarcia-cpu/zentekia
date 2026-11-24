@@ -251,7 +251,7 @@ function RatesModal({ id, name, models, onClose }) {
 function Clientes({ health }) {
   const tenants = useLoad(() => api.get('tenants'))
   const models = useLoad(() => api.get('models'))
-  const [f, setF] = useState({ name: '', slug: '', owner_email: '', monthly_limit_usd: '', plan_id: 'basico', limit_behavior: 'block', enabled: null, import_prakticall: false })
+  const [f, setF] = useState({ name: '', slug: '', owner_email: '', monthly_limit_usd: '', plan_id: 'basico', limit_behavior: 'block', enabled: null, import_prakticall: false, va: true, cc: false, cc_seats: '', cc_seat_price: '' })
   const [slugTouched, setSlugTouched] = useState(false)
   const [created, setCreated] = useState(null)
   const [detail, setDetail] = useState(null)
@@ -274,13 +274,14 @@ function Clientes({ health }) {
           plan_id: f.plan_id,
           limit_behavior: f.limit_behavior,
           enabled_models: enabled,
-          import_prakticall: f.import_prakticall,
+          import_prakticall: f.va && f.import_prakticall,
+          products: { va: f.va, cc: f.cc, cc_seats: f.cc ? Number(f.cc_seats || 0) : 0, cc_seat_price_usd: f.cc && f.cc_seat_price !== '' ? Number(f.cc_seat_price) : null },
         }),
       'Cliente creado',
     )
     if (r) {
       setCreated(r)
-      setF({ ...f, name: '', slug: '', owner_email: '', monthly_limit_usd: '', import_prakticall: false })
+      setF({ ...f, name: '', slug: '', owner_email: '', monthly_limit_usd: '', import_prakticall: false, va: true, cc: false, cc_seats: '', cc_seat_price: '' })
       setSlugTouched(false)
       tenants.reload()
     }
@@ -314,6 +315,7 @@ function Clientes({ health }) {
         <label class="l">Slug<input value={f.slug} onInput={(e) => { setSlugTouched(true); setF({ ...f, slug: e.target.value.toLowerCase() }) }} pattern="[a-z][a-z0-9\-]{1,30}[a-z0-9]" required /></label>
         <div class="small muted" style="margin-top:6px">Portal: {portalHost}</div>
         <label class="l">Correo del owner<input type="email" value={f.owner_email} onInput={(e) => setF({ ...f, owner_email: e.target.value })} placeholder="correo@cliente.com" required /></label>
+        <ProductsFields f={f} setF={setF} defaultPrice={health?.default_seat_price_micro} />
         <div class="row" style="align-items:flex-start">
           <label class="l grow">Límite mensual (USD)<input type="number" min="0" step="1" value={f.monthly_limit_usd} onInput={(e) => setF({ ...f, monthly_limit_usd: e.target.value })} placeholder="50" required /></label>
           <label class="l grow">Plan
@@ -403,14 +405,45 @@ function Clientes({ health }) {
   )
 }
 
+/** Productos del cliente: agentes virtuales y/o contact center con licencias de agente humano */
+function ProductsFields({ f, setF, defaultPrice, used }) {
+  return (
+    <fieldset class="prod">
+      <legend class="l" style="margin:0">Productos</legend>
+      <label class="check"><input type="checkbox" checked={f.va} onChange={(e) => setF({ ...f, va: e.target.checked })} /> <span><b>Agentes virtuales</b> · asistentes de IA (chat, voz, WhatsApp), cobro por uso</span></label>
+      <label class="check"><input type="checkbox" checked={f.cc} onChange={(e) => setF({ ...f, cc: e.target.checked, cc_seats: e.target.checked && !f.cc_seats ? 1 : f.cc_seats })} /> <span><b>Contact Center</b> · agentes humanos que atienden chat web y WhatsApp, cobro por licencia</span></label>
+      {f.cc && (
+        <div class="row" style="align-items:flex-start">
+          <label class="l grow">Licencias de agente humano
+            <input type="number" min={used || 0} max="10000" step="1" value={f.cc_seats} onInput={(e) => setF({ ...f, cc_seats: e.target.value })} required />
+            {used != null && <span class="small muted">En uso: {used} (agentes y supervisores)</span>}
+          </label>
+          <label class="l grow">Precio por licencia al mes (USD)
+            <input type="number" min="0" step="0.01" value={f.cc_seat_price} onInput={(e) => setF({ ...f, cc_seat_price: e.target.value })} placeholder={defaultPrice != null ? `General: ${(defaultPrice / 1e6).toFixed(2)}` : 'General'} />
+            <span class="small muted">Vacío = precio general</span>
+          </label>
+        </div>
+      )}
+      {!f.va && !f.cc && <div class="small" style="color:var(--danger,#ef4444);margin-top:6px">Activa al menos un producto.</div>}
+    </fieldset>
+  )
+}
+
 function TenantModal({ id, health, models, onClose, onRates }) {
   const { data, error, reload } = useLoad(() => api.get(`tenants/${id}`), [id])
   const [f, setF] = useState(null)
   const [inv, setInv] = useState(null)
   const [busy, run] = useAction()
   useEffect(() => {
-    if (data) setF({ name: data.tenant.name, plan_id: data.tenant.plan_id, monthly_limit_usd: data.tenant.monthly_limit_micro / 1e6, limit_behavior: data.tenant.limit_behavior, enabled_models: data.tenant.enabled_models, turnstile: Boolean(data.tenant.turnstile) })
+    if (data) {
+      const pr = data.tenant.products || { va: true, cc: false, cc_seats: 0, cc_seat_price_micro: null }
+      setF({ name: data.tenant.name, plan_id: data.tenant.plan_id, monthly_limit_usd: data.tenant.monthly_limit_micro / 1e6, limit_behavior: data.tenant.limit_behavior, enabled_models: data.tenant.enabled_models, turnstile: Boolean(data.tenant.turnstile), va: pr.va, cc: pr.cc, cc_seats: pr.cc_seats || '', cc_seat_price: pr.cc_seat_price_micro == null ? '' : pr.cc_seat_price_micro / 1e6 })
+    }
   }, [data])
+  const body = () => {
+    const { va, cc, cc_seats, cc_seat_price, ...rest } = f
+    return { ...rest, monthly_limit_usd: Number(f.monthly_limit_usd), products: { va, cc, cc_seats: cc ? Number(cc_seats || 0) : 0, cc_seat_price_usd: cc && cc_seat_price !== '' ? Number(cc_seat_price) : null } }
+  }
   return (
     <div class="modal-bg" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div class="modal" role="dialog" aria-label="Detalle del cliente" style="width:min(720px,100%)">
@@ -418,7 +451,8 @@ function TenantModal({ id, health, models, onClose, onRates }) {
           <>
             <div class="row"><h2 class="grow">{data.tenant.name}</h2><button class="b b-ghost b-sm" onClick={onClose} aria-label="Cerrar">✕</button></div>
             <div class="small muted">{data.tenant.portal} · creado {date(data.tenant.created_at)} · gasto del mes {usd(data.spend?.cost ?? 0)}</div>
-            <form onSubmit={async (e) => { e.preventDefault(); await run(() => api.put(`tenants/${id}`, { ...f, monthly_limit_usd: Number(f.monthly_limit_usd) }), 'Cliente actualizado'); reload() }}>
+            <form onSubmit={async (e) => { e.preventDefault(); await run(() => api.put(`tenants/${id}`, body()), 'Cliente actualizado'); reload() }}>
+              <ProductsFields f={f} setF={setF} defaultPrice={data.default_seat_price_micro} used={data.seats_used} />
               <div class="row" style="align-items:flex-start">
                 <label class="l grow">Nombre<input value={f.name} onInput={(e) => setF({ ...f, name: e.target.value })} /></label>
                 <label class="l grow">Plan<select value={f.plan_id} onChange={(e) => setF({ ...f, plan_id: e.target.value })}>{(health?.plans || []).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}</select></label>

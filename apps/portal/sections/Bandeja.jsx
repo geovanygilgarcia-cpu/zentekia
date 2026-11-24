@@ -127,7 +127,7 @@ export default function Bandeja({ api, readOnly }) {
   )
 }
 
-function Presence({ api, boot, reload, readOnly }) {
+export function Presence({ api, boot, reload, readOnly }) {
   const [busy, run] = useAction()
   const set = (status) => run(() => api.put('inbox/presence', { status })).then(reload)
   return (
@@ -141,7 +141,7 @@ function Presence({ api, boot, reload, readOnly }) {
   )
 }
 
-function Inbox({ api, boot, reloadBoot, readOnly }) {
+export function Inbox({ api, boot, reloadBoot, readOnly }) {
   const lead = boot.me.lead
   const [view, setView] = useState(() => (lead ? 'waiting' : 'mine'))
   const [queue, setQueue] = useState('')
@@ -264,7 +264,7 @@ function Inbox({ api, boot, reloadBoot, readOnly }) {
           <div class="ib-empty ib-empty-big">
             <Icon name="hand" size={28} />
             <p>Elige una conversación de la lista.</p>
-            <p class="small muted">Cuando el asistente pase una conversación a tu equipo aparecerá en «En espera».</p>
+            <p class="small muted">Las conversaciones nuevas aparecen en «En espera» y se reparten a quien esté en línea.</p>
           </div>
         ) : !detail ? (
           <div class="loading">Cargando…</div>
@@ -346,7 +346,7 @@ function Conversation({ api, boot, d, readOnly, reload, onBack, onContact }) {
           {canAct && (c.status === 'human_active' || c.status === 'waiting_human') && (mine || me.lead) && (
             <>
               <button class="b" disabled={busy} onClick={() => setTransfer(true)}>{me.lead && !mine ? 'Asignar' : 'Transferir'}</button>
-              <button class="b" disabled={busy} onClick={() => act('handback', {}, 'La IA vuelve a atender')}>Devolver a la IA</button>
+              {d.ai_available && <button class="b" disabled={busy} onClick={() => act('handback', {}, 'La IA vuelve a atender')}>Devolver a la IA</button>}
             </>
           )}
           {canAct && (c.status === 'human_active' || c.status === 'waiting_human') && (mine || me.lead || c.status === 'waiting_human') && (
@@ -603,7 +603,7 @@ function ContactPanel({ d, boot, onClose }) {
 }
 
 /* ---------- configuración (supervisores y admins) ---------- */
-function InboxConfig({ api, boot, reloadBoot, readOnly }) {
+export function InboxConfig({ api, boot, reloadBoot, readOnly }) {
   const isAdmin = ['owner', 'editor'].includes(boot.me.role)
   const [metrics, setMetrics] = useState(null)
   useEffect(() => {

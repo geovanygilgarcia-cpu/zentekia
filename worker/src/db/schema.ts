@@ -267,7 +267,7 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS ix_voice_pending ON voice_calls(status, created_at)`,
 ]
 
-const SCHEMA_VERSION = '10'
+const SCHEMA_VERSION = '11'
 
 let ready: Promise<void> | null = null
 
@@ -290,6 +290,9 @@ export function ensureSchema(db: D1Database): Promise<void> {
       await migrateV8(db)
       await migrateV9(db)
       await migrateV10(db)
+      // v11: productos por cliente (agentes virtuales y contact center con licencias)
+      const tc = await db.prepare('PRAGMA table_info(tenants)').all<{ name: string }>()
+      if (!tc.results.some((c) => c.name === 'products_json')) await db.prepare('ALTER TABLE tenants ADD COLUMN products_json TEXT').run()
       await seedModels(db)
       await db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema', ?)").bind(SCHEMA_VERSION).run()
     })().catch((e) => {

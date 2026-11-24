@@ -24,13 +24,28 @@ import Resumen from './sections/Resumen.jsx'
 import Proximamente from './sections/Proximamente.jsx'
 import Voz from './sections/Voz.jsx'
 import MiCuenta from './sections/MiCuenta.jsx'
-import Bandeja from './sections/Bandeja.jsx'
+// Estilos compartidos con el Contact Center (notas, eventos, licencias en Equipo)
+import './sections/bandeja.css'
 import WhatsApp from './sections/WhatsApp.jsx'
 import { Icon } from './sections/icons.jsx'
 import './portal.css'
 
 const root = document.getElementById('root')
 const api = createApi(root.dataset.base)
+/** Contact Center del cliente (otro producto); vacío si no lo tiene contratado */
+const CC_URL = root.dataset.cc || ''
+
+/** Acceso al Contact Center desde el menú del portal de agentes virtuales */
+const CcLink = () =>
+  CC_URL ? (
+    <>
+      <div class="nv-group">Otros productos</div>
+      <a class="nv" href={CC_URL}>
+        <span class="nv-ic" aria-hidden="true"><Icon name="inbox" /></span>
+        Contact Center
+      </a>
+    </>
+  ) : null
 
 /* Secciones del canal Chat (dentro de un asistente) */
 const CHAT_SECTIONS = [
@@ -45,7 +60,6 @@ const CHAT_SECTIONS = [
 ]
 /* Secciones de la cuenta (no dependen del asistente) */
 const ACCOUNT_SECTIONS = [
-  { id: 'bandeja', label: 'Bandeja', icon: 'inbox', C: Bandeja, roles: ['owner', 'editor', 'supervisor', 'agent'] },
   { id: 'reportes', label: 'Reportes', icon: 'report', C: Reportes, roles: ['owner', 'editor'] },
   { id: 'precios', label: 'Tus precios', icon: 'tag', C: Precios, roles: ['owner'] },
   { id: 'consumo', label: 'Consumo y costos', icon: 'chart', C: Consumo, roles: ['owner'] },
@@ -91,7 +105,8 @@ function Portal({ me, logout, reloadMe }) {
   // Supervisores y agentes solo trabajan en la bandeja (no configuran asistentes)
   const inboxOnly = role === 'supervisor' || role === 'agent'
 
-  const loadOverview = () => api.get('overview').then(setOv)
+  // Los canales «solo personas» son del Contact Center: no aparecen como asistentes
+  const loadOverview = () => api.get('overview').then((o) => setOv({ ...o, agents: o.agents.filter((a) => a.mode !== 'human') }))
   useEffect(() => {
     loadOverview()
     const onHash = () => {
@@ -105,8 +120,9 @@ function Portal({ me, logout, reloadMe }) {
   if (!ov) return <div class="loading">Cargando tu portal…</div>
 
   const accountSections = ACCOUNT_SECTIONS.filter((s) => s.roles.includes(role))
-  if (inboxOnly && (r.agentId || !accountSections.some((s) => s.id === r.section))) {
-    location.replace('#/bandeja')
+  // Agentes y supervisores trabajan en el Contact Center (otro producto); la Bandeja vieja también lleva allá
+  if ((inboxOnly || r.section === 'bandeja') && CC_URL) {
+    location.replace(CC_URL)
     return null
   }
   const agent = r.agentId ? ov.agents.find((a) => a.id === r.agentId) : null
@@ -221,11 +237,13 @@ function Portal({ me, logout, reloadMe }) {
                 )}
                 {accountSections.length > 0 && <div class="nv-group">Cuenta</div>}
                 {accountSections.map((s) => <NavLink key={s.id} s={s} href={`${base}/${s.id}`} />)}
+                <CcLink />
               </>
             ) : (
               <>
                 {!inboxOnly && <NavLink s={{ id: 'asistentes', label: 'Asistentes', icon: 'grid' }} href="#/" />}
                 {accountSections.map((s) => <NavLink key={s.id} s={s} href={`#/${s.id}`} />)}
+                <CcLink />
               </>
             )}
           </nav>

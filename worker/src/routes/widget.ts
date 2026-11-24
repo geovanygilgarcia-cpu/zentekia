@@ -28,7 +28,7 @@ import { analyzeConversation } from '../leads/analyze'
 import { onHandoff } from '../tools'
 import { InboxRepo, type ConvStatus } from '../db/inbox-repo'
 import type { ConversationRow } from '../db/types'
-import { aiTurnsSinceEscalation, asksForHuman, closedElsewhere, escalate, inboxEvent, inboxReady, inboxSettings, publicName, type EscalationReason } from '../inbox/core'
+import { aiAllowed, aiTurnsSinceEscalation, asksForHuman, closedElsewhere, contactCenterOn, escalate, inboxEvent, inboxSettings, publicName, type EscalationReason } from '../inbox/core'
 import { clientIp, fail, json, randomToken, readJson, SECURITY_HEADERS } from '../lib/http'
 import { hit } from '../lib/ratelimit'
 import { mergedTheme, publicConfig, withinHours } from '../widget-theme'
@@ -325,10 +325,17 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
 
   if (!withinHours(theme)) return staticReply(theme.offline_message, cid)
 
+  const portalBase = () => portalUrl(env, new URL(request.url), tenant.slug)
+  // Sin IA (canal del contact center o cliente sin agentes virtuales): directo a la cola de personas
+  if (!aiAllowed(tenant, agent)) {
+    if (!contactCenterOn(env, tenant)) return staticReply('El chat no está disponible por el momento.', cid)
+    const r = await escalate(env, ctx, tenant, agent, cid, 'direct', { portalBase: portalBase() })
+    return statusReply(cid, r.status)
+  }
+
   // Disparadores de escalamiento que no pasan por el modelo: petición explícita y máximo de turnos
   const inbox = inboxSettings(agent)
-  const portalBase = () => portalUrl(env, new URL(request.url), tenant.slug)
-  if (inbox.enabled && inboxReady(env)) {
+  if (inbox.enabled && contactCenterOn(env, tenant)) {
     let reason: EscalationReason | null = null
     if (asksForHuman(text, inbox)) reason = 'keyword'
     else if (conv && inbox.max_ai_turns > 0 && (await aiTurnsSinceEscalation(env.DB, tenant.id, conv as ConversationRow & { escalated_at?: number | null })) >= inbox.max_ai_turns) reason = 'max_turns'
@@ -446,7 +453,7 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
       let after: ConvStatus = st.ended ? 'closed' : 'ai_active'
       if (st.handoff) {
         // Herramienta del agente IA: con la bandeja activa, la conversación pasa a una persona
-        if (!st.ended && inbox.enabled && inboxReady(env)) after = (await escalate(env, ctx, tenant, agent, cid, 'ai_tool', { portalBase: portalBase() })).status
+        if (!st.ended && inbox.enabled && contactCenterOn(env, tenant)) after = (await escalate(env, ctx, tenant, agent, cid, 'ai_tool', { portalBase: portalBase() })).status
         ctx.waitUntil(onHandoff(env, tenant, repo, agent, cid, portalBase()).catch((e) => console.error('handoff', e)))
       }
       await write({ type: 'done', message_id: assistantId, sources: showSources ? sources : [], ended: st.ended, status: after })

@@ -29,11 +29,12 @@ import type { TenantRow } from '../db/types'
 import { portalUrl } from '../lib/hosts'
 import { clientIp, fail, json, readJson } from '../lib/http'
 import { match } from '../lib/router'
-import { addNote, assignTo, closeByUser, handbackByUser, humanReply, inboxEvent, InboxError, inboxReady, requestDispatch, sendWaTemplate, take, transferToQueue, waTemplatesFor } from '../inbox/core'
+import { addNote, aiAllowed, assignTo, closeByUser, handbackByUser, humanReply, inboxEvent, InboxError, inboxReady, requestDispatch, sendWaTemplate, take, transferToQueue, waTemplatesFor } from '../inbox/core'
 import { ChannelRepo } from '../db/channel-repo'
 import { parseJson } from '../db/types'
 import { contactNumber, isWhatsApp, windowOpen, type WaConvRef } from '../channels/outbound'
 import { WaError } from '../channels/whatsapp'
+import { productsOf } from '../lib/products'
 
 const INBOX_ROLES = ['owner', 'editor', 'supervisor', 'agent'] as const
 const VIEWS: InboxView[] = ['mine', 'unassigned', 'waiting', 'ai', 'all', 'closed']
@@ -41,6 +42,9 @@ const VIEWS: InboxView[] = ['mine', 'unassigned', 'waiting', 'ai', 'all', 'close
 export async function inboxRoutes(env: Env, request: Request, url: URL, tenant: TenantRow, sub: string, ctx: ExecutionContext): Promise<Response> {
   const auth = await loadSession(env, request, 'portal', tenant)
   const m = request.method
+  // La bandeja es el producto Contact Center: sin él no hay nada aquí
+  if (!auth) fail(401, 'unauthenticated', 'Tu sesión terminó. Vuelve a entrar.')
+  if (!productsOf(tenant).cc) fail(403, 'no_product', 'Tu cuenta no tiene el Contact Center. Pídelo a Zentekia.')
   const inbox = new InboxRepo(env.DB, tenant.id)
   const platform = new PlatformRepo(env.DB)
   const any = () => guard(request, env, auth, { roles: [...INBOX_ROLES] })
@@ -168,6 +172,8 @@ export async function inboxRoutes(env: Env, request: Request, url: URL, tenant: 
       history,
       channel: isWa ? { type: 'whatsapp', provider: ch?.provider ?? null, phone: ch?.display_phone || (ch ? `+${ch.phone}` : null), contact: `+${contactNumber(wa)}`, window_open: windowOpen(wa), window_expires_at: wa.wa_window_expires_at ?? null } : { type: 'web' },
       can_reply: mine && (!isWa || windowOpen(wa)),
+      // false en canales sin IA o clientes sin agentes virtuales: no hay a quién devolverla
+      ai_available: Boolean(agent && aiAllowed(tenant, agent)),
       can_template: mine && isWa,
     })
   }

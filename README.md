@@ -65,6 +65,25 @@ atienden en vivo las conversaciones que la IA escala, con traspaso en los dos se
   (tiempo hasta asignar, primera respuesta, resueltas solo por la IA).
 - **API**: `worker/src/routes/inbox.ts`. Núcleo: `worker/src/inbox/core.ts`. Datos: `worker/src/db/inbox-repo.ts` (migración v9).
 
+## Productos: Agentes virtuales y Contact Center
+
+Zentekia vende dos productos y en el panel de administración (Clientes → nuevo o detalle) se le activan a cada cliente
+uno, otro o los dos (`tenants.products_json`, migración v11):
+
+- **Agentes virtuales**: el portal de siempre (asistentes de IA, cobro por uso).
+- **Contact Center**: aplicación aparte en `/cc/` del portal del cliente (`cliente.zentekia.com/cc/`), con el mismo
+  inicio de sesión. Ahí entran los agentes humanos: se ponen en línea, reciben chats de la web y de WhatsApp, los atienden,
+  transfieren y cierran. Secciones: Bandeja (pantalla completa), Supervisión (equipo en línea, colas, respuestas rápidas,
+  métricas), Canales, Equipo y licencias, Seguridad y Mi cuenta.
+  - **Se cobra por licencia de agente humano**: cada usuario con rol «agente» o «supervisor» ocupa una. No se puede invitar
+    a más de las contratadas. El cierre de periodo agrega la línea «Licencias de Contact Center» (licencias × precio; precio
+    especial por cliente o el general de `DEFAULT_SEAT_PRICE_MICRO`, hoy 25 USD).
+  - **Canales sin IA**: chat web y WhatsApp que entran directo a la cola (por dentro son asistentes con `mode: 'human'`, así
+    reutilizan widget, instalación, WhatsApp y bandeja). Un cliente solo con Contact Center nace con el canal «Chat web».
+  - Sin agentes virtuales la IA nunca contesta ni se cobra (tampoco el resumen automático: se usa el análisis básico).
+- La bandeja y el traspaso IA → persona requieren el Contact Center. Los clientes existentes quedan solo con Agentes
+  virtuales hasta que se les active.
+
 ## WhatsApp · fase 2 (360dialog y YCloud)
 
 Cada asistente puede tener un número de WhatsApp Business conectado con **360dialog** o **YCloud** (el cliente elige).
