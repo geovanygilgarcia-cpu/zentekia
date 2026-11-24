@@ -40,6 +40,38 @@ Instalación en el sitio del cliente (una línea):
 - **Prakticall**: al dar de alta el cliente `prakticall` puedes importar sus 4 agentes de chat.
   Si la base todavía tiene los prompts que editaste en la versión anterior (`legacy_prompts`), se usan esos.
 
+## Bandeja omnicanal · fase 1 (web chat con personas)
+
+Implementa la fase 1 de la *Especificación técnica: plataforma omnicanal Zentekia*: personas del equipo
+atienden en vivo las conversaciones que la IA escala, con traspaso en los dos sentidos.
+
+- **Estados** (`conversations.status`): `ai_active` → `waiting_human` → `human_active` → `closed`, y de regreso a `ai_active`.
+  La regla de que la IA no responde con una persona vive en el servidor (`routes/widget.ts`), no en el prompt.
+- **Disparadores** (Herramientas → Pasar a una persona → «Pasar a la Bandeja»): la marca `[HUMANO]` del agente IA,
+  frases del visitante («hablar con una persona»…) y máximo de respuestas de la IA. Cola, mensajes, espera máxima
+  y qué hacer sin nadie disponible (sigue la IA o se queda en la cola) se configuran por asistente.
+- **Reparto**: agente en línea, con capacidad libre y de la cola; gana el de menos carga y, si empatan, el que lleva
+  más tiempo sin recibir una. Dos agentes nunca toman la misma (UPDATE condicional en D1). Si un agente se
+  desconecta más de 60 s, sus conversaciones vuelven a la cola.
+- **Tiempo real**: `InboxHubDO` (uno por cliente: WebSockets de la bandeja, presencia y reparto; también hace el papel
+  del QueueDO del spec) y `ConversationDO` (uno por conversación: WebSocket del visitante y alarma de espera).
+  Los eventos de la bandeja solo llevan ids; cada agente vuelve a pedir lo que su rol le deja ver.
+- **Timeline**: `messages.kind` = `text` · `notice` (aviso que ve el visitante) · `note` (nota interna) · `event` (evento interno).
+  Notas y eventos nunca llegan al widget ni al modelo.
+- **Roles nuevos**: `supervisor` (ve todo, reasigna, interviene conversaciones de la IA) y `agent` (sus conversaciones,
+  las de sus colas y las sin cola). Ambos solo entran a la Bandeja y a Mi cuenta.
+- **Portal**: sección Bandeja (lista con filtros, chat con notas y respuestas rápidas con `/`, panel del contacto con el
+  resumen de la IA, tomar, transferir, devolver a la IA, cerrar) y pestaña de equipo, colas, respuestas rápidas y métricas
+  (tiempo hasta asignar, primera respuesta, resueltas solo por la IA).
+- **API**: `worker/src/routes/inbox.ts`. Núcleo: `worker/src/inbox/core.ts`. Datos: `worker/src/db/inbox-repo.ts` (migración v9).
+
+Pendiente para fases siguientes: WhatsApp (fase 2), plantillas y flujos (fase 3), voz (fase 4), horarios por cola
+y la política «agendar devolución de llamada».
+
+> **Publicar la bandeja requiere `npm run deploy`** (Opción A): crea los Durable Objects con su migración.
+> Si publicas pegando el archivo único (Opción B), todo lo anterior sigue funcionando, pero la Bandeja queda
+> desactivada hasta que agregues los Durable Objects `INBOX_HUB` y `CONVERSATION_DO`.
+
 ## Publicar
 
 ### Opción A · terminal (recomendada)

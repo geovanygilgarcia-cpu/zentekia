@@ -18,8 +18,12 @@ import { widgetRoutes } from './routes/widget'
 import { processSource } from './rag/kb'
 import { sweepVoiceCalls } from './routes/voice'
 import { sweepAnalysis } from './leads/analyze'
+import { inboxRoutes } from './routes/inbox'
 import { asset } from './assets'
 import { FAVICON_B64 } from './favicon'
+
+// Durable Objects de la bandeja omnicanal (los declara wrangler.toml)
+export { ConversationDO, InboxHubDO } from './inbox/durable'
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -95,6 +99,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
       }
     }
     if (rest.startsWith('/v1/auth/')) return authRoutes(env, request, 'portal', tenant, rest.slice('/v1/auth/'.length))
+    if (rest.startsWith('/v1/inbox/')) return inboxRoutes(env, request, url, tenant, rest.slice('/v1/inbox/'.length), ctx)
     if (rest.startsWith('/v1/')) return portalRoutes(env, request, url, tenant, rest.slice('/v1/'.length))
     if (request.method === 'GET') return spaPage(env, url, 'portal', { base: `${base}/v1`, slug, tenant: tenant.name })
   }
@@ -126,7 +131,8 @@ function spaPage(env: Env, url: URL, app: 'admin' | 'portal', data: Record<strin
     `img-src 'self' data: blob: ${chat}`,
     // Muestras de voz (ElevenLabs)
     'media-src https: blob:',
-    "connect-src 'self'",
+    // WebSocket de la bandeja (mismo host)
+    `connect-src 'self' ${url.origin.replace(/^http/, 'ws')}`,
     `frame-src ${chat}`,
     "frame-ancestors 'none'",
     "base-uri 'none'",

@@ -24,6 +24,7 @@ import Resumen from './sections/Resumen.jsx'
 import Proximamente from './sections/Proximamente.jsx'
 import Voz from './sections/Voz.jsx'
 import MiCuenta from './sections/MiCuenta.jsx'
+import Bandeja from './sections/Bandeja.jsx'
 import { Icon } from './sections/icons.jsx'
 import './portal.css'
 
@@ -43,12 +44,13 @@ const CHAT_SECTIONS = [
 ]
 /* Secciones de la cuenta (no dependen del asistente) */
 const ACCOUNT_SECTIONS = [
+  { id: 'bandeja', label: 'Bandeja', icon: 'inbox', C: Bandeja, roles: ['owner', 'editor', 'supervisor', 'agent'] },
   { id: 'reportes', label: 'Reportes', icon: 'report', C: Reportes, roles: ['owner', 'editor'] },
   { id: 'precios', label: 'Tus precios', icon: 'tag', C: Precios, roles: ['owner'] },
   { id: 'consumo', label: 'Consumo y costos', icon: 'chart', C: Consumo, roles: ['owner'] },
   { id: 'equipo', label: 'Equipo', icon: 'users', C: Equipo, roles: ['owner'] },
   { id: 'seguridad', label: 'Seguridad', icon: 'shield', C: Seguridad, roles: ['owner'] },
-  { id: 'cuenta', label: 'Mi cuenta', icon: 'user', C: MiCuenta, roles: ['owner', 'editor'] },
+  { id: 'cuenta', label: 'Mi cuenta', icon: 'user', C: MiCuenta, roles: ['owner', 'editor', 'supervisor', 'agent'] },
 ]
 /* Canales del asistente. Para activar uno nuevo: cambia su estado en el backend (overview → channels) y agrega sus secciones. */
 export const CHANNELS = [
@@ -84,7 +86,9 @@ function Portal({ me, logout, reloadMe }) {
   const [ov, setOv] = useState(null)
   const [r, setR] = useState(parseHash())
   const role = me.user.role
-  const roleLabel = me.impersonating ? 'Soporte · solo lectura' : { owner: 'Propietario', editor: 'Editor' }[role] || role
+  const roleLabel = me.impersonating ? 'Soporte · solo lectura' : { owner: 'Propietario', editor: 'Editor', supervisor: 'Supervisor', agent: 'Agente' }[role] || role
+  // Supervisores y agentes solo trabajan en la bandeja (no configuran asistentes)
+  const inboxOnly = role === 'supervisor' || role === 'agent'
 
   const loadOverview = () => api.get('overview').then(setOv)
   useEffect(() => {
@@ -100,6 +104,10 @@ function Portal({ me, logout, reloadMe }) {
   if (!ov) return <div class="loading">Cargando tu portal…</div>
 
   const accountSections = ACCOUNT_SECTIONS.filter((s) => s.roles.includes(role))
+  if (inboxOnly && (r.agentId || !accountSections.some((s) => s.id === r.section))) {
+    location.replace('#/bandeja')
+    return null
+  }
   const agent = r.agentId ? ov.agents.find((a) => a.id === r.agentId) : null
   // La Guía Zentekia la administra Zentekia: solo se ve su resumen, conversaciones e instalación
   const isGuide = agent?.kind === 'guide'
@@ -207,7 +215,7 @@ function Portal({ me, logout, reloadMe }) {
               </>
             ) : (
               <>
-                <NavLink s={{ id: 'asistentes', label: 'Asistentes', icon: 'grid' }} href="#/" />
+                {!inboxOnly && <NavLink s={{ id: 'asistentes', label: 'Asistentes', icon: 'grid' }} href="#/" />}
                 {accountSections.map((s) => <NavLink key={s.id} s={s} href={`#/${s.id}`} />)}
               </>
             )}

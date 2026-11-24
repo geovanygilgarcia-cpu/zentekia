@@ -8,6 +8,19 @@ binding = "DB"
 database_name = "zc-test"
 database_id = "00000000-0000-0000-0000-000000000000"
 
+# Bandeja omnicanal (Durable Objects locales)
+[[durable_objects.bindings]]
+name = "INBOX_HUB"
+class_name = "InboxHubDO"
+
+[[durable_objects.bindings]]
+name = "CONVERSATION_DO"
+class_name = "ConversationDO"
+
+[[migrations]]
+tag = "v1-bandeja"
+new_sqlite_classes = ["InboxHubDO", "ConversationDO"]
+
 [vars]
 BASE_DOMAIN = ""
 TOTP_OBLIGATORIO = "true"

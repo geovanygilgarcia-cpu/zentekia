@@ -30,6 +30,21 @@ database_id = "ce9f1b04-5495-4fe2-8b25-107818336e17"
 binding = "VECTORIZE"
 index_name = "zentekia-kb"
 
+# Bandeja omnicanal (fase 1): agentes humanos + traspaso IA ⇄ persona
+#   InboxHubDO:     uno por cliente (WebSockets de la bandeja, presencia y reparto)
+#   ConversationDO: uno por conversación (WebSocket del visitante y alarma de espera)
+[[durable_objects.bindings]]
+name = "INBOX_HUB"
+class_name = "InboxHubDO"
+
+[[durable_objects.bindings]]
+name = "CONVERSATION_DO"
+class_name = "ConversationDO"
+
+[[migrations]]
+tag = "v1-bandeja"
+new_sqlite_classes = ["InboxHubDO", "ConversationDO"]
+
 # [[r2_buckets]]
 # binding = "FILES"
 # bucket_name = "zentekia-archivos"

@@ -26,6 +26,9 @@ import { retrieve } from '../rag/kb'
 import { chatOrigin, normalizeOrigin, portalOrigin, portalUrl } from '../lib/hosts'
 import { analyzeConversation } from '../leads/analyze'
 import { onHandoff } from '../tools'
+import { InboxRepo, type ConvStatus } from '../db/inbox-repo'
+import type { ConversationRow } from '../db/types'
+import { aiTurnsSinceEscalation, asksForHuman, closedElsewhere, escalate, inboxEvent, inboxReady, inboxSettings, publicName, type EscalationReason } from '../inbox/core'
 import { clientIp, fail, json, randomToken, readJson, SECURITY_HEADERS } from '../lib/http'
 import { hit } from '../lib/ratelimit'
 import { mergedTheme, publicConfig, withinHours } from '../widget-theme'
@@ -94,7 +97,8 @@ export async function widgetRoutes(env: Env, request: Request, url: URL, path: s
       'font-src https://fonts.gstatic.com',
       "img-src 'self' data:",
       // Voz (ElevenLabs): WebRTC/WebSocket con ElevenLabs y los worklets de audio del SDK
-      "connect-src 'self' https://*.elevenlabs.io wss://*.elevenlabs.io",
+      // + WebSocket propio para recibir en vivo las respuestas de una persona (bandeja)
+      `connect-src 'self' ${ownOrigin.replace(/^http/, 'ws')} https://*.elevenlabs.io wss://*.elevenlabs.io`,
       "media-src 'self' blob: mediastream:",
       "worker-src 'self' blob:",
       `frame-src${turn || " 'none'"}`,
@@ -108,6 +112,22 @@ export async function widgetRoutes(env: Env, request: Request, url: URL, path: s
 
   // Herramienta de conocimiento para la voz: la llama ElevenLabs (servidor), no el navegador
   if (path === '/v1/voice/tool/kb' && m === 'POST') return voiceToolRoute(env, request, url)
+
+  // Tiempo real del visitante (bandeja): WebSocket al ConversationDO de su conversación.
+  // El navegador no puede mandar encabezados en un WebSocket: el token firmado va en el query.
+  if (path === '/v1/live' && m === 'GET') {
+    if (request.headers.get('Origin') !== ownOrigin) fail(403, 'origin', 'Origen no permitido.')
+    if (request.headers.get('Upgrade') !== 'websocket') fail(426, 'upgrade', 'Se esperaba un WebSocket.')
+    if (!env.CONVERSATION_DO) fail(503, 'unavailable', 'Tiempo real no disponible.')
+    if (!hit(`ip:${clientIp(request)}`, 40)) fail(429, 'rate_limited', 'Demasiadas solicitudes. Espera un momento.')
+    const tok = await verifyToken<WidgetToken>(env, 'widget', url.searchParams.get('t') || '')
+    if (!tok) fail(401, 'session_expired', 'La sesión del chat venció. Recarga para continuar.')
+    const repo = new TenantRepo(env.DB, tok!.t)
+    const conv = await repo.conversation(url.searchParams.get('c') || '')
+    if (!conv || conv.visitor_id !== tok!.v) fail(404, 'not_found', 'Conversación no encontrada.')
+    const stub = env.CONVERSATION_DO!.get(env.CONVERSATION_DO!.idFromName(`${tok!.t}:${conv!.id}`))
+    return stub.fetch('https://do/ws', { headers: request.headers })
+  }
 
   if (path === '/v1/widget/config' && (m === 'GET' || m === 'OPTIONS')) {
     const key = url.searchParams.get('key')
@@ -176,8 +196,17 @@ export async function widgetRoutes(env: Env, request: Request, url: URL, path: s
       const id = url.searchParams.get('id') || ''
       const conv = await repo.conversation(id)
       if (!conv || conv.visitor_id !== t.v) return json({ messages: [] })
-      const msgs = await repo.messages(id, 200)
-      return json({ ended: Boolean(conv.ended_at), rating: conv.rating, messages: msgs.map((x) => ({ id: x.id, role: x.role, content: x.content, feedback: x.feedback, sources: parseJson(x.sources_json, []) })) })
+      // Nunca notas internas ni eventos de la bandeja
+      const msgs = await repo.contactMessages(id, 200)
+      const names = msgs.some((x) => x.sender === 'human') ? new Map((await new InboxRepo(env.DB, tenant!.id).team()).map((u) => [u.id, publicName(u)])) : new Map<string, string>()
+      const status = (conv as ConversationRow & { status?: string }).status ?? 'ai_active'
+      return json({
+        ended: Boolean(conv.ended_at),
+        rating: conv.rating,
+        status,
+        live: Boolean(env.CONVERSATION_DO),
+        messages: msgs.map((x) => ({ id: x.id, role: x.role, content: x.content, feedback: x.feedback, sources: parseJson(x.sources_json, []), sender: x.sender ?? null, kind: x.kind ?? 'text', author: x.sender === 'human' ? names.get(x.author_id || '') || 'Un agente' : null })),
+      })
     }
     if (path === '/v1/feedback' && m === 'POST') {
       const b = await readJson(request, z.object({ conversation_id: z.string().max(64), message_id: z.string().max(64), value: z.union([z.literal(1), z.literal(-1), z.null()]) }))
@@ -191,6 +220,7 @@ export async function widgetRoutes(env: Env, request: Request, url: URL, path: s
       const conv = await repo.conversation(b.conversation_id)
       if (!conv || conv.visitor_id !== t.v) fail(404, 'not_found', 'Conversación no encontrada.')
       const closed = await repo.endConversation(conv!.id, 'visitor')
+      if (closed) await closedElsewhere(env, tenant!.id, conv!.id)
       if (b.rating) await repo.rateConversation(conv!.id, b.rating)
       // Resumen y prospecto en segundo plano (el visitante no espera)
       if (closed) ctx.waitUntil(analyzeConversation(env, tenant!, repo, conv!.id, { portalBase: portalUrl(env, url, tenant!.slug) }).catch((e) => console.error('analysis', e)))
@@ -244,6 +274,12 @@ async function verifyTurnstile(env: Env, token: string, ip: string): Promise<boo
 
 const sse = (o: unknown) => `data: ${JSON.stringify(o)}\n\n`
 
+/** La IA no responde: solo confirma el mensaje y el estado (la persona contesta por el WebSocket) */
+function statusReply(convId: string, status: ConvStatus): Response {
+  const body = sse({ type: 'meta', conversation_id: convId }) + sse({ type: 'done', status, handled: true })
+  return new Response(body, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', ...SECURITY_HEADERS } })
+}
+
 function staticReply(text: string, convId: string | null): Response {
   const body = sse({ type: 'meta', conversation_id: convId }) + sse({ type: 'delta', text }) + sse({ type: 'done', notice: true })
   return new Response(body, { headers: { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', ...SECURITY_HEADERS } })
@@ -271,14 +307,37 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
     conv = null
   }
   const cid = convId!
-  if (conv && conv.message_count >= plan.maxMessagesPerConversation * 2) {
+  const status = ((conv as (ConversationRow & { status?: string }) | null)?.status ?? 'ai_active') as ConvStatus
+  const withHuman = status === 'waiting_human' || status === 'human_active'
+  // El tope de mensajes es para la IA; con una persona la conversación sigue
+  if (conv && !withHuman && conv.message_count >= plan.maxMessagesPerConversation * 2) {
     return staticReply('Llegamos al máximo de mensajes en esta conversación. Inicia una nueva para seguir.', cid)
   }
 
   const userMsgId = crypto.randomUUID()
   await repo.insertMessage({ id: userMsgId, conversation_id: cid, role: 'user', content: text, tokens_in: 0, tokens_out: 0, model_id: null, estimated: 0, sources_json: null })
 
+  // Bandeja: si la atiende una persona (o espera a una), la IA NO responde. Lo decide el servidor, no el prompt.
+  if (withHuman) {
+    await inboxEvent(env, tenant.id, 'message.created', { conversation_id: cid, message_id: userMsgId })
+    return statusReply(cid, status)
+  }
+
   if (!withinHours(theme)) return staticReply(theme.offline_message, cid)
+
+  // Disparadores de escalamiento que no pasan por el modelo: petición explícita y máximo de turnos
+  const inbox = inboxSettings(agent)
+  const portalBase = () => portalUrl(env, new URL(request.url), tenant.slug)
+  if (inbox.enabled && inboxReady(env)) {
+    let reason: EscalationReason | null = null
+    if (asksForHuman(text, inbox)) reason = 'keyword'
+    else if (conv && inbox.max_ai_turns > 0 && (await aiTurnsSinceEscalation(env.DB, tenant.id, conv as ConversationRow & { escalated_at?: number | null })) >= inbox.max_ai_turns) reason = 'max_turns'
+    if (reason) {
+      const r = await escalate(env, ctx, tenant, agent, cid, reason, { portalBase: portalBase() })
+      if (r.escalated && r.status !== 'ai_active') return statusReply(cid, r.status)
+    }
+  }
+
   if (!(await budgetAllows(repo, tenant))) {
     ctx.waitUntil(checkThresholds(env, repo, tenant).catch(() => {}))
     return staticReply('Por ahora no puedo responder. Déjanos tus datos o intenta más tarde, por favor.', cid)
@@ -381,10 +440,16 @@ async function chat(env: Env, request: Request, ctx: ExecutionContext, t: Widget
       await repo.insertMessage({ id: assistantId, conversation_id: cid, role: 'assistant', content, tokens_in: tin, tokens_out: tout, model_id: r.model.id, estimated: estimated ? 1 : 0, sources_json: showSources && sources.length ? JSON.stringify(sources) : null })
       await recordUsage(env, repo, tenant, { model: r.model, tokensIn: tin, tokensOut: tout, estimated, messageId: assistantId, conversationId: cid })
       if (st.ended && (await repo.endConversation(cid, 'agent'))) {
-        ctx.waitUntil(analyzeConversation(env, tenant, repo, cid, { portalBase: portalUrl(env, new URL(request.url), tenant.slug) }).catch((e) => console.error('analysis', e)))
+        await closedElsewhere(env, tenant.id, cid)
+        ctx.waitUntil(analyzeConversation(env, tenant, repo, cid, { portalBase: portalBase() }).catch((e) => console.error('analysis', e)))
       }
-      if (st.handoff) ctx.waitUntil(onHandoff(env, tenant, repo, agent, cid, portalUrl(env, new URL(request.url), tenant.slug)).catch((e) => console.error('handoff', e)))
-      await write({ type: 'done', message_id: assistantId, sources: showSources ? sources : [], ended: st.ended })
+      let after: ConvStatus = st.ended ? 'closed' : 'ai_active'
+      if (st.handoff) {
+        // Herramienta del agente IA: con la bandeja activa, la conversación pasa a una persona
+        if (!st.ended && inbox.enabled && inboxReady(env)) after = (await escalate(env, ctx, tenant, agent, cid, 'ai_tool', { portalBase: portalBase() })).status
+        ctx.waitUntil(onHandoff(env, tenant, repo, agent, cid, portalBase()).catch((e) => console.error('handoff', e)))
+      }
+      await write({ type: 'done', message_id: assistantId, sources: showSources ? sources : [], ended: st.ended, status: after })
     } catch (e) {
       await notifyOwner(repo, e)
       if (st.full && st.resolved) {

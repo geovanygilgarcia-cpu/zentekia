@@ -30,7 +30,7 @@ export interface UserRow {
   tenant_id: string | null
   email: string
   name: string | null
-  role: 'superadmin' | 'owner' | 'editor'
+  role: 'superadmin' | 'owner' | 'editor' | 'supervisor' | 'agent'
   password_hash: string | null
   totp_secret_enc: string | null
   totp_enabled: number
@@ -98,11 +98,38 @@ export interface AgentConfig {
 
 export type WebhookEvent = 'conversation.analyzed' | 'lead.detected' | 'handoff.requested'
 
+/**
+ * Pasar a una persona.
+ *  mode 'notify' (o sin definir): solo avisa por correo/webhook con la liga (comportamiento anterior)
+ *  mode 'inbox': la conversación pasa a la bandeja, una persona la atiende en vivo y la IA deja de responder
+ */
+export interface HandoffConfig {
+  enabled?: boolean
+  when?: string
+  message?: string
+  email?: boolean
+  mode?: 'notify' | 'inbox'
+  /** Frases con las que el visitante pide a una persona (escala sin pasar por la IA) */
+  keywords?: string[]
+  /** Escala solo si la IA ya respondió este número de veces sin resolver (0 = apagado) */
+  max_ai_turns?: number
+  /** Cola a la que llega (null = cola general) */
+  queue_id?: string | null
+  waiting_message?: string
+  assigned_message?: string
+  handback_message?: string
+  /** Si no hay nadie disponible: 'ai' = sigue la IA · 'wait' = se queda en la cola (dejar recado) */
+  no_agents?: 'ai' | 'wait'
+  no_agents_message?: string
+  /** Tiempo máximo de espera en minutos antes de aplicar la política (0 = sin límite) */
+  max_wait_min?: number
+}
+
 export interface ToolsConfig {
   /** Prospectos: pide datos de contacto, califica la conversación y avisa por correo. Sin definir = activo (comportamiento anterior). */
   leads?: { enabled?: boolean }
-  /** Pasar a una persona: el agente marca la conversación y se avisa al equipo */
-  handoff?: { enabled?: boolean; when?: string; message?: string; email?: boolean }
+  /** Pasar a una persona: el agente marca la conversación y se avisa al equipo (o se pasa a la bandeja) */
+  handoff?: HandoffConfig
   /** Webhook: manda eventos en JSON a otro sistema (CRM, Zapier, Make, n8n…) firmados con HMAC */
   webhook?: { enabled?: boolean; url?: string; secret?: string; events?: WebhookEvent[]; last_status?: number | null; last_at?: number | null; last_error?: string | null }
   /** Agendar citas: comparte la liga de tu calendario (Calendly, Cal.com, Google Calendar…) */
@@ -278,8 +305,14 @@ export interface MessageRow {
   id: string
   tenant_id: string
   conversation_id: string
-  role: 'user' | 'assistant'
+  /** 'system' = aviso o evento de la bandeja (ver kind) */
+  role: 'user' | 'assistant' | 'system'
   content: string
+  /** null = visitante o IA (según role) · 'human' = persona del equipo · 'system' */
+  sender?: 'human' | 'system' | null
+  author_id?: string | null
+  /** text = conversación · notice = aviso que ve el visitante · note = nota interna · event = evento interno */
+  kind?: 'text' | 'notice' | 'note' | 'event'
   tokens_in: number
   tokens_out: number
   model_id: string | null

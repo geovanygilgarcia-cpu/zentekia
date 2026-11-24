@@ -1,0 +1,28 @@
+# Config para probar EN LOCAL con los modelos REALES de Workers AI (Gemma, DeepSeek, Llama).
+# La base de datos es local (no toca producción), pero cada respuesta del chat SÍ se cobra
+# en tu cuenta de Cloudflare (centavos). Requiere: npx wrangler login
+#   npx wrangler dev --config tests/wrangler.ia-real.toml --port 8787 --var TOTP_OBLIGATORIO:false
+name = "zentekia-chat-ia-real"
+main = "../worker/src/index.ts"
+compatibility_date = "2025-06-01"
+
+# Cuenta de Cloudflare de zentekia.com (lerikg10): ahí se cobra el uso de Workers AI
+account_id = "2dbaf67c6576975767e67cb4d4f844b0"
+
+# Workers AI real (siempre corre en Cloudflare, aunque el Worker corra en tu compu)
+[ai]
+binding = "AI"
+
+# Base de datos local, separada de la de pruebas simuladas
+[[d1_databases]]
+binding = "DB"
+database_name = "zc-ia-real"
+database_id = "00000000-0000-0000-0000-000000000001"
+
+[vars]
+BASE_DOMAIN = ""
+TOTP_OBLIGATORIO = "true"
+DEV_FAKE_AI = "false"
+ADMIN_EMAIL = "erik@zentekia.com"
+ADMIN_PASSWORD = "clave-de-prueba-123"
+MASTER_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="

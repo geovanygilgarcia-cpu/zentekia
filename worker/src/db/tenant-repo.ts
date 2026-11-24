@@ -4,6 +4,7 @@
   y ese id siempre sale del servidor (widget_key validada o sesión del portal), nunca del cliente.
   Los handlers no escriben SQL: todo pasa por aquí.
 */
+import type { TenantRole } from '../env'
 import type {
   AgentRow,
   AlertRow,
@@ -403,12 +404,20 @@ export class TenantRepo {
       this.tenantId, from,
     ).all<{ agent_id: string; n: number; last_at: number }>().then((r) => r.results)
   }
+  /** Todos los mensajes (incluye notas internas y eventos de la bandeja): solo para el portal */
   messages(convId: string, limit = 500) {
     return this.q('SELECT * FROM messages WHERE tenant_id = ? AND conversation_id = ? ORDER BY created_at, rowid LIMIT ?', this.tenantId, convId, limit).all<MessageRow>().then((r) => r.results)
   }
+  /** Lo que puede ver el visitante: conversación y avisos (nunca notas internas ni eventos) */
+  contactMessages(convId: string, limit = 200) {
+    return this.q("SELECT * FROM messages WHERE tenant_id = ? AND conversation_id = ? AND kind IN ('text', 'notice') ORDER BY created_at, rowid LIMIT ?", this.tenantId, convId, limit)
+      .all<MessageRow>()
+      .then((r) => r.results)
+  }
+  /** Historial para el modelo: solo visitante y respuestas (de la IA o de una persona) */
   async recentMessages(convId: string, limit: number) {
     const r = await this.q(
-      'SELECT role, content FROM messages WHERE tenant_id = ? AND conversation_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?',
+      "SELECT role, content FROM messages WHERE tenant_id = ? AND conversation_id = ? AND role IN ('user', 'assistant') AND kind = 'text' ORDER BY created_at DESC, rowid DESC LIMIT ?",
       this.tenantId, convId, limit,
     ).all<{ role: 'user' | 'assistant'; content: string }>()
     return r.results.reverse()
@@ -460,12 +469,12 @@ export class TenantRepo {
     if (channel === 'voice') extra.push("c.channel = 'voice'")
     if (channel === 'chat') extra.push("(c.channel IS NULL OR c.channel <> 'voice')")
     return this.q(
-      `SELECT c.id AS conversation_id, a.name AS agent, c.origin, m.role, m.content, m.created_at
+      `SELECT c.id AS conversation_id, a.name AS agent, c.origin, m.role, m.sender, m.kind, m.content, m.created_at
        FROM messages m JOIN conversations c ON c.id = m.conversation_id AND c.tenant_id = m.tenant_id
        LEFT JOIN agents a ON a.id = c.agent_id AND a.tenant_id = c.tenant_id
        WHERE m.tenant_id = ? AND m.created_at >= ? AND m.created_at < ?${extra.map((x) => ' AND ' + x).join('')} ORDER BY c.id, m.created_at LIMIT 50000`,
       this.tenantId, from, to, ...vals,
-    ).all<{ conversation_id: string; agent: string | null; origin: string | null; role: string; content: string; created_at: number }>().then((r) => r.results)
+    ).all<{ conversation_id: string; agent: string | null; origin: string | null; role: string; sender: string | null; kind: string | null; content: string; created_at: number }>().then((r) => r.results)
   }
   avgTokensPerConversation(since: number) {
     return this.q(
@@ -601,15 +610,17 @@ export class TenantRepo {
   userByEmail(email: string) {
     return this.q('SELECT * FROM users WHERE tenant_id = ? AND email = ?', this.tenantId, email).first<UserRow>()
   }
-  async createUser(u: { id: string; email: string; name: string | null; role: 'owner' | 'editor' }) {
+  async createUser(u: { id: string; email: string; name: string | null; role: TenantRole }) {
     await this.q("INSERT INTO users (id, tenant_id, email, name, role, status, created_at) VALUES (?, ?, ?, ?, ?, 'invited', ?)", u.id, this.tenantId, u.email, u.name, u.role, Date.now()).run()
   }
-  async setUserRole(userId: string, role: 'owner' | 'editor') {
+  async setUserRole(userId: string, role: TenantRole) {
     await this.q('UPDATE users SET role = ? WHERE tenant_id = ? AND id = ?', role, this.tenantId, userId).run()
   }
   async deleteUser(userId: string) {
     await this.db.batch([
       this.db.prepare('DELETE FROM sessions WHERE tenant_id = ? AND user_id = ?').bind(this.tenantId, userId),
+      this.db.prepare('DELETE FROM queue_members WHERE tenant_id = ? AND user_id = ?').bind(this.tenantId, userId),
+      this.db.prepare('DELETE FROM agent_presence WHERE tenant_id = ? AND user_id = ?').bind(this.tenantId, userId),
       this.db.prepare('DELETE FROM users WHERE tenant_id = ? AND id = ?').bind(this.tenantId, userId),
     ])
   }
