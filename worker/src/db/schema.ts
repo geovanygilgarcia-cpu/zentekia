@@ -267,7 +267,7 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS ix_voice_pending ON voice_calls(status, created_at)`,
 ]
 
-const SCHEMA_VERSION = '8'
+const SCHEMA_VERSION = '9'
 
 let ready: Promise<void> | null = null
 
@@ -288,6 +288,7 @@ export function ensureSchema(db: D1Database): Promise<void> {
       await migrateV6(db)
       await migrateV7(db)
       await migrateV8(db)
+      await migrateV9(db)
       await seedModels(db)
       await db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema', ?)").bind(SCHEMA_VERSION).run()
     })().catch((e) => {
@@ -429,6 +430,81 @@ async function migrateV8(db: D1Database) {
     )
   }
   if (stmts.length) await db.batch(stmts)
+}
+
+/**
+ * v9: bandeja omnicanal (fase 1).
+ *  - conversations: estado (ai_active · waiting_human · human_active · closed), quién atiende, cola,
+ *    motivo del escalamiento y tiempos precalculados para reportes.
+ *  - messages: quién lo escribió (sender: null = visitante o IA según role · 'human' · 'system'),
+ *    autor humano y tipo (text · note · event). Las notas internas nunca llegan al visitante.
+ *  - queues, queue_members, quick_replies y agent_presence.
+ */
+async function migrateV9(db: D1Database) {
+  const ccols = await db.prepare('PRAGMA table_info(conversations)').all<{ name: string }>()
+  const ch = new Set(ccols.results.map((c) => c.name))
+  const cadd: Array<[string, string]> = [
+    ['status', "TEXT NOT NULL DEFAULT 'ai_active'"],
+    ['assignee_user_id', 'TEXT'],
+    ['queue_id', 'TEXT'],
+    ['escalation_reason', 'TEXT'],
+    ['escalation_note', 'TEXT'],
+    ['escalated_at', 'INTEGER'],
+    ['assigned_at', 'INTEGER'],
+    ['first_human_response_at', 'INTEGER'],
+    ['handled_by_human', 'INTEGER NOT NULL DEFAULT 0'],
+  ]
+  for (const [name, type] of cadd) {
+    if (!ch.has(name)) await db.prepare(`ALTER TABLE conversations ADD COLUMN ${name} ${type}`).run()
+  }
+  const mcols = await db.prepare('PRAGMA table_info(messages)').all<{ name: string }>()
+  const mh = new Set(mcols.results.map((c) => c.name))
+  const madd: Array<[string, string]> = [
+    ['sender', 'TEXT'],
+    ['author_id', 'TEXT'],
+    ['kind', "TEXT NOT NULL DEFAULT 'text'"],
+  ]
+  for (const [name, type] of madd) {
+    if (!mh.has(name)) await db.prepare(`ALTER TABLE messages ADD COLUMN ${name} ${type}`).run()
+  }
+  await db.batch(
+    [
+      "UPDATE conversations SET status = 'closed' WHERE ended_at IS NOT NULL AND status = 'ai_active'",
+      'CREATE INDEX IF NOT EXISTS ix_conv_status ON conversations(tenant_id, status, last_message_at DESC)',
+      'CREATE INDEX IF NOT EXISTS ix_conv_assignee ON conversations(tenant_id, assignee_user_id, status)',
+      `CREATE TABLE IF NOT EXISTS queues (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
+      'CREATE INDEX IF NOT EXISTS ix_queues_tenant ON queues(tenant_id, name)',
+      `CREATE TABLE IF NOT EXISTS queue_members (
+        tenant_id TEXT NOT NULL,
+        queue_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, queue_id, user_id)
+      )`,
+      'CREATE INDEX IF NOT EXISTS ix_qm_user ON queue_members(tenant_id, user_id)',
+      `CREATE TABLE IF NOT EXISTS quick_replies (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        shortcut TEXT NOT NULL,
+        text TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )`,
+      'CREATE INDEX IF NOT EXISTS ix_qr_tenant ON quick_replies(tenant_id, shortcut)',
+      `CREATE TABLE IF NOT EXISTS agent_presence (
+        tenant_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'offline',
+        max_chats INTEGER NOT NULL DEFAULT 4,
+        last_assigned_at INTEGER,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (tenant_id, user_id)
+      )`,
+    ].map((s) => db.prepare(s)),
+  )
 }
 
 async function seedModels(db: D1Database) {

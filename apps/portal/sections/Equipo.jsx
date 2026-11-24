@@ -3,7 +3,13 @@ import { date } from '../../shared/api.js'
 import { toast } from '../../shared/toast.jsx'
 import { Field, Loading, PageHead, useAction, useLoad } from './common.jsx'
 
-const ROLE = { owner: 'Owner', editor: 'Editor' }
+const ROLE = { owner: 'Owner', editor: 'Editor', supervisor: 'Supervisor', agent: 'Agente (bandeja)' }
+const ROLE_OPTIONS = [
+  ['editor', 'Editor'],
+  ['owner', 'Owner'],
+  ['supervisor', 'Supervisor'],
+  ['agent', 'Agente (bandeja)'],
+]
 
 export default function Equipo({ api, readOnly }) {
   const { data, error, reload } = useLoad(() => api.get('team'))
@@ -23,7 +29,7 @@ export default function Equipo({ api, readOnly }) {
   }
   return (
     <>
-      <PageHead title="Equipo" sub="Invita a tu equipo. Los editores configuran el agente, el conocimiento y el widget; no ven API keys ni facturación." />
+      <PageHead title="Equipo" sub="Invita a tu equipo. Los editores configuran el agente, el conocimiento y el widget; no ven API keys ni facturación. Supervisores y agentes atienden la Bandeja." />
       <div class="cols">
         <div class="col-main">
           <div class="card">
@@ -37,8 +43,7 @@ export default function Equipo({ api, readOnly }) {
                       <td>
                         {u.id === data.me || readOnly ? ROLE[u.role] : (
                           <select class="in" style="margin-top:0;padding:6px 8px;width:auto" value={u.role} onChange={(e) => run(() => api.put(`team/${u.id}`, { role: e.target.value }), 'Rol actualizado').then(reload)} aria-label={`Rol de ${u.email}`}>
-                            <option value="owner">Owner</option>
-                            <option value="editor">Editor</option>
+                            {ROLE_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                           </select>
                         )}
                       </td>
@@ -66,10 +71,10 @@ export default function Equipo({ api, readOnly }) {
               <Field label="Correo"><input type="email" value={email} onInput={(e) => setEmail(e.target.value)} required /></Field>
               <Field label="Rol">
                 <select value={role} onChange={(e) => setRole(e.target.value)}>
-                  <option value="editor">Editor</option>
-                  <option value="owner">Owner</option>
+                  {ROLE_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                 </select>
               </Field>
+              <p class="small muted" style="margin:8px 0 0">Supervisores y agentes solo entran a la Bandeja: atienden las conversaciones que la IA pasa a tu equipo. El supervisor ve todas y reasigna.</p>
               <button class="b b-primary" style="margin-top:16px" disabled={busy}>Crear invitación</button>
               {link && (
                 <div class="info" style="margin-top:14px">

@@ -92,6 +92,15 @@ function beep() {
 
 const uid = () => Math.random().toString(36).slice(2)
 
+/** Nombre de la última persona del equipo que escribió (para el encabezado) */
+const lastAuthor = (msgs) => [...msgs].reverse().find((m) => m.sender === 'human')?.author || null
+
+const HANDLER = {
+  es: { waiting: 'Esperando a una persona…', human: (n) => (n ? `Te atiende ${n}` : 'Te atiende una persona') },
+  en: { waiting: 'Waiting for a person…', human: (n) => (n ? `${n} is helping you` : 'A person is helping you') },
+  pt: { waiting: 'Aguardando uma pessoa…', human: (n) => (n ? `${n} está te atendendo` : 'Uma pessoa está te atendendo') },
+}
+
 function App() {
   const [cfg, setCfg] = useState(null)
   const [fatal, setFatal] = useState(null)
@@ -103,6 +112,10 @@ function App() {
   const [ended, setEnded] = useState(false)
   const [rating, setRating] = useState(null)
   const [calling, setCalling] = useState(false)
+  // Bandeja: ai_active · waiting_human · human_active (con una persona la IA no responde)
+  const [status, setStatus] = useState('ai_active')
+  const [agentName, setAgentName] = useState(null)
+  const [live, setLive] = useState(true)
   const convRef = useRef(store.get('conv'))
   const visibleRef = useRef(true)
   const capRef = useRef(null)
@@ -126,7 +139,9 @@ function App() {
             if (j.ended) {
               setEnded(true)
               setRating(j.rating || null)
-            }
+            } else if (j.status) setStatus(j.status)
+            setLive(j.live !== false)
+            setAgentName(lastAuthor(restored))
           } catch {}
         }
         setMessages([...welcome(c), ...restored])
@@ -217,7 +232,9 @@ function App() {
             }
             upsert({ id: realId, content })
           } else if (ev.type === 'done') {
-            upsert({ id: realId, content, final: !ev.notice, sources: ev.sources || [] })
+            // La IA no respondió porque atiende (o se espera a) una persona: solo cambia el estado
+            if (!ev.handled || content) upsert({ id: realId, content, final: !ev.notice, sources: ev.sources || [] })
+            if (ev.status) setStatus(ev.status)
             // El agente usó la herramienta de finalizar: se cierra el chat y se pide calificación
             if (ev.ended) {
               setEnded(true)
@@ -251,8 +268,87 @@ function App() {
     store.set('conv', null)
     setEnded(false)
     setRating(null)
+    setStatus('ai_active')
+    setAgentName(null)
     setMessages(welcome(cfg))
   }
+
+  /* ---------- bandeja: respuestas de una persona en tiempo real ---------- */
+  // Vuelve a pedir el historial (al conectar o reconectar no se pierde nada)
+  async function syncHistory() {
+    if (!convRef.current) return
+    try {
+      const h = await authed(`/v1/conversation?id=${encodeURIComponent(convRef.current)}`)
+      const j = await h.json()
+      const restored = (j.messages || []).map((m) => ({ ...m, final: true }))
+      setMessages([...welcome(cfg), ...restored])
+      setAgentName(lastAuthor(restored))
+      if (j.ended) {
+        setEnded(true)
+        setRating(j.rating || null)
+      } else if (j.status) setStatus(j.status)
+    } catch {}
+  }
+  const withHuman = status === 'waiting_human' || status === 'human_active'
+  useEffect(() => {
+    if (!cfg || !withHuman || ended || !live || !convRef.current) return
+    let ws = null
+    let stop = false
+    let tries = 0
+    let ping = null
+    let timer = null
+    const open = async () => {
+      let t
+      try {
+        if (tries > 0) token = null // el token pudo vencer
+        t = await session()
+      } catch {
+        if (!stop) timer = setTimeout(open, Math.min(30_000, 2000 * 2 ** tries++))
+        return
+      }
+      const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/v1/live?c=${encodeURIComponent(convRef.current)}&t=${encodeURIComponent(t)}`
+      ws = new WebSocket(url)
+      ws.onopen = () => {
+        tries = 0
+        syncHistory()
+        ping = setInterval(() => ws.readyState === 1 && ws.send('ping'), 25_000)
+      }
+      ws.onmessage = (e) => {
+        if (e.data === 'pong') return
+        let ev
+        try {
+          ev = JSON.parse(e.data)
+        } catch {
+          return
+        }
+        if (ev.type === 'message' && ev.message) {
+          setMessages((m) => (m.some((x) => x.id === ev.message.id) ? m : [...m, { ...ev.message, final: true }]))
+          if (ev.message.sender === 'human') {
+            setAgentName(ev.message.author)
+            if (cfg.theme.sound && !visibleRef.current) beep()
+            post({ type: 'zt:message' })
+          }
+        } else if (ev.type === 'status') {
+          setStatus(ev.status)
+          if (ev.agent_name) setAgentName(ev.agent_name)
+        } else if (ev.type === 'ended') {
+          setEnded(true)
+          post({ type: 'zt:ended' })
+        }
+      }
+      ws.onclose = () => {
+        clearInterval(ping)
+        if (!stop) timer = setTimeout(open, Math.min(30_000, 1000 * 2 ** tries++))
+      }
+    }
+    open()
+    return () => {
+      stop = true
+      clearInterval(ping)
+      clearTimeout(timer)
+      ws?.close()
+    }
+  }, [cfg, withHuman, ended, live])
 
   async function endConversation() {
     setEnded(true)
@@ -322,7 +418,8 @@ function App() {
         offline={!cfg.online}
         notice={!cfg.online ? t.offline_message : null}
         privacy={t.privacy_notice ? { text: t.privacy_notice, required: t.privacy_required, accepted, onAccept: () => { store.set('privacy', '1'); setAccepted(true) } } : null}
-        onCall={cfg.voice && !VOICE_OFF && !cfg.suspended && cfg.online && !(t.privacy_required && t.privacy_notice && !accepted) ? () => setCalling(true) : null}
+        onCall={cfg.voice && !VOICE_OFF && !cfg.suspended && cfg.online && !withHuman && !(t.privacy_required && t.privacy_notice && !accepted) ? () => setCalling(true) : null}
+        handler={ended || cfg.suspended ? null : status === 'waiting_human' ? (HANDLER[cfg.language] || HANDLER.es).waiting : status === 'human_active' ? (HANDLER[cfg.language] || HANDLER.es).human(agentName) : null}
       />
       {calling && (
         <VoiceCall

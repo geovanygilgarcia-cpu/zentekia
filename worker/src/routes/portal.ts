@@ -29,15 +29,42 @@ import { TEMPLATES } from '../templates/industry'
 import { contrastProblems, DEFAULT_THEME, mergedTheme } from '../widget-theme'
 import { checkWebhookUrl, newWebhookSecret, sendWebhook } from '../tools/webhook'
 import type { ToolsConfig } from '../db/types'
+import { InboxRepo } from '../db/inbox-repo'
+import { inboxReady, onAgentGone } from '../inbox/core'
 
 const hex = z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'color en formato #RRGGBB')
+
+/** Roles que el owner puede dar: editor administra; supervisor y agent trabajan en la bandeja */
+const TEAM_ROLES = ['owner', 'editor', 'supervisor', 'agent'] as const
+
+/** Rol de cada mensaje en la exportación */
+const exportRole = (r: { role: string; sender: string | null; kind: string | null }) =>
+  r.kind === 'note' ? 'nota interna' : r.kind === 'event' || r.kind === 'notice' || r.role === 'system' ? 'sistema' : r.role === 'user' ? 'visitante' : r.sender === 'human' ? 'persona' : 'agente'
 
 const httpsUrl = z.string().trim().max(500).regex(/^https:\/\/[^\s]+\.[^\s]+$/i, 'La liga debe ser completa y empezar con https://')
 const WEBHOOK_EVENTS = ['conversation.analyzed', 'lead.detected', 'handoff.requested'] as const
 const toolsSchema = z
   .object({
     leads: z.object({ enabled: z.boolean() }).partial(),
-    handoff: z.object({ enabled: z.boolean(), when: z.string().max(800), message: z.string().max(300), email: z.boolean() }).partial(),
+    handoff: z
+      .object({
+        enabled: z.boolean(),
+        when: z.string().max(800),
+        message: z.string().max(300),
+        email: z.boolean(),
+        // Bandeja omnicanal (fase 1)
+        mode: z.enum(['notify', 'inbox']),
+        keywords: z.array(z.string().trim().min(3).max(60)).max(20),
+        max_ai_turns: z.number().int().min(0).max(50),
+        queue_id: z.string().max(64).nullable(),
+        waiting_message: z.string().max(300),
+        assigned_message: z.string().max(300),
+        handback_message: z.string().max(300),
+        no_agents: z.enum(['ai', 'wait']),
+        no_agents_message: z.string().max(300),
+        max_wait_min: z.number().int().min(0).max(240),
+      })
+      .partial(),
     webhook: z.object({ enabled: z.boolean(), url: z.string().trim().max(500), events: z.array(z.enum(WEBHOOK_EVENTS)).max(3), rotate_secret: z.boolean() }).partial(),
     booking: z.object({ enabled: z.boolean(), url: z.union([httpsUrl, z.literal('')]), when: z.string().max(500) }).partial(),
     whatsapp: z.object({ enabled: z.boolean(), number: z.string().trim().max(25), message: z.string().max(300) }).partial(),
@@ -146,6 +173,8 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
   const ip = clientIp(request)
   const any = () => guard(request, env, ctx, { roles: ['owner', 'editor'] })
   const owner = () => guard(request, env, ctx, { roles: ['owner'] })
+  // Supervisores y agentes de la bandeja: solo lo básico del portal (resumen de la cuenta)
+  const anyRole = () => guard(request, env, ctx, { roles: ['owner', 'editor', 'supervisor', 'agent'] })
   const audit = (action: string, detail?: unknown) =>
     platform.audit({ actor_id: ctx!.user.id, actor_email: ctx!.session.impersonator_id ? `soporte:${ctx!.user.email}` : ctx!.user.email, tenant_id: tenant.id, action, detail, ip })
   const role = () => (ctx!.session.impersonator_id ? 'owner' : ctx!.user.role)
@@ -168,7 +197,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
 
   /* ---------- resumen ---------- */
   if (sub === 'overview' && m === 'GET') {
-    any()
+    anyRole()
     const agents = await repo.listAgents()
     const widgets = await repo.widgets()
     const alerts = role() === 'owner' ? await repo.alerts(10) : []
@@ -197,6 +226,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
       chat_origin: chatOrigin(env, url),
       can_hide_powered_by: PLANS[tenant.plan_id]?.canHidePoweredBy ?? false,
       voice_available: voiceAvailable(env),
+      inbox_ready: inboxReady(env),
     })
   }
   if (sub === 'alerts/read' && m === 'POST') {
@@ -292,6 +322,11 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
         if (b[k] !== undefined) (cfg as Record<string, unknown>)[k] = b[k]
       }
       if (b.tools) cfg.tools = mergeTools(cfg.tools, b.tools)
+      const h = cfg.tools?.handoff
+      if (b.tools?.handoff && h?.enabled && h.mode === 'inbox') {
+        if (!inboxReady(env)) fail(400, 'inbox_unavailable', 'La bandeja todavía no está activa en este servidor. Usa «Avisar por correo» o pide a Zentekia que la active.')
+        if (h.queue_id && !(await new InboxRepo(env.DB, tenant.id).queue(h.queue_id))) fail(400, 'queue', 'La cola elegida ya no existe.')
+      }
       await repo.updateAgent(a!.id, { name: b.name, welcome_message: b.welcome_message, language: b.language, system_prompt: b.system_prompt, temperature: b.temperature, config_json: JSON.stringify(cfg) })
       await audit('agent.updated', { agent_id: a!.id, fields: Object.keys(b) })
       // Si tiene voz, la llamada usa las instrucciones nuevas
@@ -799,7 +834,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     return sendTable(
       'conversaciones',
       ['conversacion', 'agente', 'sitio', 'rol', 'mensaje', 'fecha'],
-      rows.map((r) => [r.conversation_id, r.agent, r.origin, r.role === 'user' ? 'visitante' : 'agente', r.content, new Date(r.created_at)]),
+      rows.map((r) => [r.conversation_id, r.agent, r.origin, exportRole(r), r.content, new Date(r.created_at)]),
       sub.endsWith('.xlsx'),
     )
   }
@@ -809,7 +844,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
       const c = await repo.conversation(p.id!)
       if (!c) fail(404, 'not_found', 'Conversación no encontrada.')
       const msgs = await repo.messages(c!.id)
-      return json({ conversation: c, messages: msgs.map((x) => ({ id: x.id, role: x.role, content: x.content, created_at: x.created_at, model_id: x.model_id, tokens_in: x.tokens_in, tokens_out: x.tokens_out, feedback: x.feedback })) })
+      return json({ conversation: c, messages: msgs.map((x) => ({ id: x.id, role: x.role, sender: x.sender ?? null, kind: x.kind ?? 'text', content: x.content, created_at: x.created_at, model_id: x.model_id, tokens_in: x.tokens_in, tokens_out: x.tokens_out, feedback: x.feedback })) })
     }
     if (m === 'DELETE') {
       owner()
@@ -963,7 +998,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
   }
   if (sub === 'team/invite' && m === 'POST') {
     owner()
-    const b = await readJson(request, z.object({ email: z.string().trim().toLowerCase().email().max(200), role: z.enum(['owner', 'editor']) }))
+    const b = await readJson(request, z.object({ email: z.string().trim().toLowerCase().email().max(200), role: z.enum(TEAM_ROLES) }))
     let u = await repo.userByEmail(b.email)
     if (u && u.status === 'active') fail(400, 'exists', 'Esa persona ya tiene acceso.')
     if (!u) {
@@ -982,12 +1017,14 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     if (u!.id === ctx!.user.id) fail(400, 'self', 'No puedes cambiar tu propio acceso.')
     if (u!.role === 'owner' && u!.status === 'active' && (await repo.ownerCount()) <= 1) fail(400, 'last_owner', 'Debe quedar al menos un owner.')
     if (m === 'PUT') {
-      const b = await readJson(request, z.object({ role: z.enum(['owner', 'editor']) }))
+      const b = await readJson(request, z.object({ role: z.enum(TEAM_ROLES) }))
       await repo.setUserRole(u!.id, b.role)
       await audit('team.role_changed', { user_id: u!.id, role: b.role })
       return json({ ok: true })
     }
     if (m === 'DELETE') {
+      // Lo que atendía en la bandeja vuelve a la cola antes de quitarle el acceso
+      await onAgentGone(env, tenant.id, u!.id).catch((e) => console.error('agent_gone', e))
       await repo.deleteUser(u!.id)
       await audit('team.removed', { email: u!.email })
       return json({ ok: true })

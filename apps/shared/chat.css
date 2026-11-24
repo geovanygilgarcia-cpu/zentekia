@@ -131,6 +131,11 @@
 .zw-user { align-self: flex-end; align-items: flex-end; }
 .zw-assistant { align-self: flex-start; }
 .zw-who { font-size: 9.5px; color: var(--zw-faint); margin: 0 0 4px 4px; }
+/* Bandeja: avisos del sistema y mensajes de una persona del equipo */
+.zw-system { align-self: center; max-width: 92%; text-align: center; }
+.zw-system span { display: inline-block; font-size: 11.5px; line-height: 1.45; color: var(--zw-faint); background: color-mix(in srgb, var(--zw-text) 6%, transparent); border: 1px solid var(--zw-line); border-radius: 999px; padding: 5px 12px; }
+.zw-human .zw-who { color: color-mix(in srgb, var(--zw-primary) 70%, var(--zw-text)); font-weight: 600; }
+.zw-human .zw-bubble { white-space: pre-wrap; border-left: 3px solid var(--zw-primary) !important; }
 .zw-bubble { padding: 10px 13px; border-radius: 16px; word-wrap: break-word; overflow-wrap: anywhere; }
 .zw-user .zw-bubble {
   background: linear-gradient(135deg, var(--zw-user), color-mix(in srgb, var(--zw-user) 70%, #000));

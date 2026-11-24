@@ -280,9 +280,16 @@ export default function Conversaciones({ api, ov, me, readOnly, agentId, param }
                 )}
                 <div class="lead-sec-t" style="margin-top:18px">Transcripción</div>
                 <div class="transcript">
-                  {detail.messages.map((m) => (
+                  {detail.messages.map((m) =>
+                    // Bandeja: eventos y avisos del sistema, notas internas del equipo
+                    m.kind === 'event' || m.kind === 'notice' ? (
+                      <div key={m.id} class="ib-event"><span>{m.content}</span></div>
+                    ) : m.kind === 'note' ? (
+                      <div key={m.id} class="tmsg ib-note"><div class="ib-note-tag">Nota interna</div><div style="white-space:pre-wrap">{m.content}</div></div>
+                    ) : (
                     <div key={m.id} style={`display:flex;flex-direction:column;align-items:${m.role === 'user' ? 'flex-end' : 'flex-start'}`}>
-                      <div class={'tmsg ' + m.role}>{m.role === 'assistant' ? <Markdown text={m.content} /> : m.content}</div>
+                      {m.sender === 'human' && <div class="ib-from">Persona del equipo</div>}
+                      <div class={'tmsg ' + m.role + (m.sender === 'human' ? ' ib-human' : '')}>{m.role === 'assistant' && m.sender !== 'human' ? <Markdown text={m.content} /> : m.content}</div>
                       <div class="tmeta">
                         {date(m.created_at)}
                         {m.role === 'assistant' && m.tokens_in + m.tokens_out > 0 && ` · ${m.tokens_in + m.tokens_out} tokens`}

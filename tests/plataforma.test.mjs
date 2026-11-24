@@ -448,3 +448,219 @@ test('prospectos: al cerrar se resume, se detecta el prospecto y sus datos; filt
   // el asistente pide los datos marcados (va en las instrucciones)
   await A.br.put(`${pa()}/v1/agents/${agent}`, { lead_fields: [], lead_alerts: 'hot', lead_criteria: '' })
 })
+
+/* ---------- bandeja omnicanal (fase 1): IA ⇄ persona en el web chat ---------- */
+
+// Cada visitante simulado con su propia IP (el widget limita 40 solicitudes por minuto por IP)
+let ipN = 0
+const vIp = () => `10.77.${Math.floor(++ipN / 250)}.${ipN % 250}`
+const ipOf = new Map()
+
+/** Primer mensaje de un visitante nuevo (igual que widgetChat, con IP propia) */
+async function visitorChat(key, origin, message) {
+  const ip = vIp()
+  const s = await fetch(`${BASE}/v1/session`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: BASE, 'CF-Connecting-IP': ip }, body: JSON.stringify({ key, origin }) })
+  const sj = await s.json()
+  if (!s.ok) return { status: s.status, error: sj, events: [], text: '' }
+  ipOf.set(sj.token, ip)
+  const r = await chatOn(sj.token, null, message)
+  return { ...r, token: sj.token }
+}
+const history = async (token, conv) => (await fetch(`${BASE}/v1/conversation?id=${conv}`, { headers: { Authorization: `Bearer ${token}`, 'CF-Connecting-IP': ipOf.get(token) || vIp() } })).json()
+
+/** Un mensaje más del visitante en la misma conversación (mismo token) */
+async function chatOn(token, conversation_id, message) {
+  const r = await fetch(`${BASE}/v1/chat`, { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: BASE, Authorization: `Bearer ${token}`, 'CF-Connecting-IP': ipOf.get(token) || vIp() }, body: JSON.stringify({ message, conversation_id }) })
+  const events = (await r.text()).split('\n\n').filter((l) => l.startsWith('data:')).map((l) => JSON.parse(l.slice(5)))
+  return { status: r.status, events, text: events.filter((e) => e.type === 'delta').map((e) => e.text).join(''), done: events.find((e) => e.type === 'done'), conv: events.find((e) => e.type === 'meta')?.conversation_id }
+}
+
+/** WebSocket del visitante: junta los eventos que llegan */
+function visitorSocket(token, conv) {
+  const ws = new WebSocket(`${BASE.replace(/^http/, 'ws')}/v1/live?c=${conv}&t=${encodeURIComponent(token)}`, { headers: { Origin: BASE, 'CF-Connecting-IP': vIp() } })
+  const events = []
+  const opened = new Promise((ok, bad) => {
+    ws.onopen = ok
+    ws.onerror = bad
+  })
+  ws.onmessage = (e) => e.data !== 'pong' && events.push(JSON.parse(e.data))
+  const waitFor = async (pred, ms = 5000) => {
+    const t0 = Date.now()
+    while (Date.now() - t0 < ms) {
+      const hit = events.find(pred)
+      if (hit) return hit
+      await new Promise((r) => setTimeout(r, 50))
+    }
+    return null
+  }
+  return { ws, events, opened, waitFor }
+}
+
+const IB = { ag1: new Browser(), ag2: new Browser(), sup: new Browser() }
+
+test('bandeja: escala, la IA deja de responder, una sola persona toma y el visitante recibe en vivo', async () => {
+  const agent = A.agents[1]
+  const key = agent.widget_key
+  // con la bandeja apagada, «hablar con una persona» no cambia nada (comportamiento anterior)
+  const before = await visitorChat(key, `https://${A.slug}.example`, 'Hola, ¿me ayudas?')
+  const off = await chatOn(before.token, before.conv, 'quiero hablar con una persona')
+  assert.match(off.text, /Respuesta simulada/)
+
+  // el owner activa la bandeja en «Pasar a una persona» (sin agentes: se queda en la cola)
+  const on = await A.br.put(`${pa()}/v1/agents/${agent.id}`, { tools: { handoff: { enabled: true, mode: 'inbox', no_agents: 'wait', max_wait_min: 0 } } })
+  assert.equal(on.status, 200, on.text)
+  // una cola que no es del cliente no se acepta
+  assert.equal((await A.br.put(`${pa()}/v1/agents/${agent.id}`, { tools: { handoff: { enabled: true, mode: 'inbox', queue_id: 'no-existe' } } })).status, 400)
+
+  // dos agentes y un supervisor (roles nuevos)
+  for (const [k, role] of [['ag1', 'agent'], ['ag2', 'agent'], ['sup', 'supervisor']]) {
+    const inv = await A.br.post(`${pa()}/v1/team/invite`, { email: `${k}@${A.slug}.com`, role })
+    assert.equal(inv.status, 200, inv.text)
+    await acceptInvite(IB[k], pa(), inv.json.link, `Clave${k}12345`)
+  }
+  // un agente no entra a la configuración de asistentes ni al equipo
+  assert.equal((await IB.ag1.get(`${pa()}/v1/agents/${agent.id}`)).status, 403)
+  assert.equal((await IB.ag1.get(`${pa()}/v1/team`)).status, 403)
+  assert.equal((await IB.ag1.get(`${pa()}/v1/overview`)).status, 200)
+  const boot = await IB.ag1.get(`${pa()}/v1/inbox/bootstrap`)
+  assert.equal(boot.status, 200, boot.text)
+  assert.equal(boot.json.ready, true)
+  assert.equal(boot.json.me.role, 'agent')
+
+  // el visitante pide una persona: escala sin pasar por la IA
+  const c = await visitorChat(key, `https://${A.slug}.example`, 'Hola, tengo un problema con mi pedido')
+  assert.match(c.text, /Respuesta simulada/, JSON.stringify(c.events))
+  const esc = await chatOn(c.token, c.conv, 'Quiero hablar con una persona, por favor')
+  assert.equal(esc.text, '', 'la IA no debe responder al escalar')
+  assert.equal(esc.done.status, 'waiting_human')
+  // mientras espera, la IA no contesta
+  const waiting = await chatOn(c.token, c.conv, '¿hay alguien?')
+  assert.equal(waiting.text, '')
+  assert.equal(waiting.done.handled, true)
+
+  // aparece sin asignar en la bandeja de los agentes
+  const un = await IB.ag1.get(`${pa()}/v1/inbox/conversations?view=unassigned`)
+  assert.ok(un.json.items.some((x) => x.id === c.conv), un.text)
+  assert.ok(un.json.counts.unassigned >= 1)
+
+  // el visitante abre su canal en tiempo real
+  const vs = visitorSocket(c.token, c.conv)
+  await vs.opened
+
+  // dos agentes toman a la vez: solo uno gana
+  const [t1, t2] = await Promise.all([IB.ag1.post(`${pa()}/v1/inbox/conversations/${c.conv}/take`), IB.ag2.post(`${pa()}/v1/inbox/conversations/${c.conv}/take`)])
+  assert.deepEqual([t1.status, t2.status].sort(), [200, 409], `${t1.text} ${t2.text}`)
+  const [win, lose] = t1.status === 200 ? [IB.ag1, IB.ag2] : [IB.ag2, IB.ag1]
+  assert.ok(await vs.waitFor((e) => e.type === 'status' && e.status === 'human_active'), 'el visitante se entera de que lo atiende una persona')
+
+  // solo quien la tiene responde; cualquiera del equipo deja notas internas
+  assert.equal((await lose.post(`${pa()}/v1/inbox/conversations/${c.conv}/messages`, { type: 'text', text: 'yo también' })).status, 409)
+  const reply = await win.post(`${pa()}/v1/inbox/conversations/${c.conv}/messages`, { type: 'text', text: 'Hola, soy de soporte. ¿Cuál es tu número de pedido?' })
+  assert.equal(reply.status, 200, reply.text)
+  assert.equal((await lose.post(`${pa()}/v1/inbox/conversations/${c.conv}/messages`, { type: 'note', text: 'NOTA-SECRETA cliente frecuente' })).status, 200)
+  const live = await vs.waitFor((e) => e.type === 'message' && e.message.sender === 'human')
+  assert.ok(live, `no llegó en vivo: ${JSON.stringify(vs.events)}`)
+  assert.match(live.message.content, /soy de soporte/)
+  assert.ok(!vs.events.some((e) => JSON.stringify(e).includes('NOTA-SECRETA')), 'una nota interna llegó al visitante')
+  vs.ws.close()
+
+  // el visitante escribe: le llega a la persona, la IA sigue callada
+  const v2 = await chatOn(c.token, c.conv, 'Es el pedido 12345')
+  assert.equal(v2.text, '')
+  assert.equal(v2.done.status, 'human_active')
+
+  // historial del visitante: respuesta de la persona y avisos, nunca notas ni eventos internos
+  const h = await history(c.token, c.conv)
+  assert.equal(h.status, 'human_active')
+  assert.ok(h.messages.some((m) => m.sender === 'human' && m.author && /soporte/.test(m.content)))
+  assert.ok(h.messages.some((m) => m.role === 'system' && m.kind === 'notice'))
+  assert.ok(h.messages.every((m) => !m.content.includes('NOTA-SECRETA') && m.kind !== 'event'))
+
+  // la bandeja guarda tiempos, notas, eventos y el motivo
+  const d = await win.get(`${pa()}/v1/inbox/conversations/${c.conv}`)
+  assert.equal(d.status, 200, d.text)
+  assert.equal(d.json.can_reply, true)
+  const cv = d.json.conversation
+  assert.equal(cv.escalation_reason, 'keyword')
+  assert.ok(cv.escalated_at && cv.assigned_at && cv.first_human_response_at, 'faltan tiempos de escalamiento, asignación o primera respuesta')
+  assert.ok(d.json.messages.some((m) => m.kind === 'note' && m.content.includes('NOTA-SECRETA')))
+  assert.ok(d.json.messages.some((m) => m.kind === 'event'))
+  assert.ok(d.json.messages.some((m) => m.role === 'user' && m.content === 'Es el pedido 12345'))
+
+  // devolver a la IA: vuelve a responder el modelo
+  assert.equal((await lose.post(`${pa()}/v1/inbox/conversations/${c.conv}/handback`)).status, 403, 'solo quien atiende (o un supervisor) devuelve')
+  assert.equal((await win.post(`${pa()}/v1/inbox/conversations/${c.conv}/handback`)).status, 200)
+  const back = await chatOn(c.token, c.conv, 'gracias, ya quedó')
+  assert.match(back.text, /Respuesta simulada/)
+  // el historial que ve la IA incluye lo que dijo la persona, no las notas
+  assert.equal(back.done.status, 'ai_active')
+
+  // herramienta del agente IA ([HUMANO]): con un agente en línea se asigna sola y la marca no llega al visitante
+  assert.equal((await IB.ag1.put(`${pa()}/v1/inbox/presence`, { status: 'online' })).status, 200)
+  const tool = await chatOn(c.token, c.conv, 'mejor que me atienda una persona')
+  assert.ok(!/\[|humano\]/i.test(tool.text), `se filtró la marca: ${tool.text}`)
+  assert.equal(tool.done.status, 'human_active')
+  const d2 = (await IB.ag1.get(`${pa()}/v1/inbox/conversations/${c.conv}`)).json.conversation
+  assert.equal(d2.assignee_user_id, boot.json.me.id)
+  assert.equal(d2.escalation_reason, 'ai_tool')
+
+  // el supervisor ve todas y reasigna; luego se cierra y el visitante lo ve cerrado
+  const all = await IB.sup.get(`${pa()}/v1/inbox/conversations?view=all`)
+  assert.ok(all.json.items.some((x) => x.id === c.conv))
+  const ag2id = (await IB.ag2.get(`${pa()}/v1/inbox/bootstrap`)).json.me.id
+  assert.equal((await IB.ag1.post(`${pa()}/v1/inbox/conversations/${c.conv}/assign`, { user_id: ag2id })).status, 403, 'un agente no reasigna')
+  assert.equal((await IB.sup.post(`${pa()}/v1/inbox/conversations/${c.conv}/assign`, { user_id: ag2id })).status, 200)
+  assert.equal((await IB.ag2.post(`${pa()}/v1/inbox/conversations/${c.conv}/close`)).status, 200)
+  assert.equal((await history(c.token, c.conv)).ended, true)
+  assert.equal((await IB.ag2.post(`${pa()}/v1/inbox/conversations/${c.conv}/close`)).status, 409)
+  const m = await IB.sup.get(`${pa()}/v1/inbox/metrics?days=1`)
+  assert.equal(m.status, 200, m.text)
+  assert.ok(m.json.escalated >= 1 && m.json.avg_first_response_ms != null)
+  await IB.ag1.put(`${pa()}/v1/inbox/presence`, { status: 'offline' })
+  A.inboxConv = c.conv
+})
+
+test('bandeja: aislamiento entre clientes y colas', async () => {
+  // B no ve ni toca la bandeja de A
+  assert.equal((await B.br.get(`${pb()}/v1/inbox/conversations/${A.inboxConv}`)).status, 404)
+  assert.equal((await B.br.post(`${pb()}/v1/inbox/conversations/${A.inboxConv}/take`)).status, 404)
+  assert.equal((await B.br.post(`${pb()}/v1/inbox/conversations/${A.inboxConv}/messages`, { type: 'note', text: 'intruso' })).status, 404)
+  for (const v of ['mine', 'unassigned', 'waiting', 'ai', 'all', 'closed']) {
+    const l = await B.br.get(`${pb()}/v1/inbox/conversations?view=${v}`)
+    assert.equal(l.status, 200, l.text)
+    assert.ok(l.json.items.every((x) => x.id !== A.inboxConv), `B ve una conversación de A en ${v}`)
+  }
+  // la sesión de un agente de A no sirve en el portal de B
+  assert.equal((await IB.ag1.get(`${pb()}/v1/inbox/bootstrap`)).status, 401)
+  // el WebSocket de la bandeja exige el mismo origen y sesión
+  const noOrigin = await IB.ag1.get(`${pa()}/v1/inbox/ws`, { Origin: 'https://evil.example' })
+  assert.equal(noOrigin.status, 403)
+  // el token del widget de B no abre el canal en vivo de una conversación de A
+  const ws = new WebSocket(`${BASE.replace(/^http/, 'ws')}/v1/live?c=${A.inboxConv}&t=${encodeURIComponent(B.token)}`, { headers: { Origin: BASE, 'CF-Connecting-IP': vIp() } })
+  const res = await new Promise((ok) => {
+    ws.onopen = () => ok('open')
+    ws.onerror = () => ok('error')
+  })
+  assert.equal(res, 'error')
+  // colas: solo administradores las crean; un agente solo ve las de sus colas (y las sin cola)
+  assert.equal((await IB.sup.post(`${pa()}/v1/inbox/queues`, { name: 'Ventas' })).status, 403)
+  const q = await A.br.post(`${pa()}/v1/inbox/queues`, { name: 'Ventas' })
+  assert.equal(q.status, 200, q.text)
+  const qs = await B.br.get(`${pb()}/v1/inbox/queues`)
+  assert.ok(qs.json.queues.every((x) => x.id !== q.json.id), 'B ve las colas de A')
+  assert.equal((await B.br.put(`${pb()}/v1/inbox/queues/${q.json.id}`, { name: 'hack' })).status, 404)
+  const agent = A.agents[1]
+  assert.equal((await A.br.put(`${pa()}/v1/agents/${agent.id}`, { tools: { handoff: { enabled: true, mode: 'inbox', queue_id: q.json.id } } })).status, 200)
+  const c = await visitorChat(agent.widget_key, `https://${A.slug}.example`, 'hola')
+  assert.equal((await chatOn(c.token, c.conv, 'quiero hablar con una persona')).done.status, 'waiting_human')
+  // ag1 no es de la cola Ventas: no la ve; el supervisor sí
+  assert.equal((await IB.ag1.get(`${pa()}/v1/inbox/conversations/${c.conv}`)).status, 404)
+  assert.ok((await IB.sup.get(`${pa()}/v1/inbox/conversations?view=waiting`)).json.items.some((x) => x.id === c.conv))
+  const ag1id = (await IB.ag1.get(`${pa()}/v1/inbox/bootstrap`)).json.me.id
+  assert.equal((await A.br.put(`${pa()}/v1/inbox/queues/${q.json.id}`, { name: 'Ventas', members: [ag1id] })).status, 200)
+  assert.equal((await IB.ag1.get(`${pa()}/v1/inbox/conversations/${c.conv}`)).status, 200)
+  // respuestas rápidas por cliente
+  assert.equal((await IB.sup.post(`${pa()}/v1/inbox/quick-replies`, { shortcut: 'horario', text: 'Lunes a viernes de 9 a 18 h.' })).status, 200)
+  assert.ok((await B.br.get(`${pb()}/v1/inbox/quick-replies`)).json.items.every((x) => x.shortcut !== 'horario'))
+  await A.br.put(`${pa()}/v1/agents/${agent.id}`, { tools: { handoff: { enabled: false, mode: 'notify', queue_id: null } } })
+})

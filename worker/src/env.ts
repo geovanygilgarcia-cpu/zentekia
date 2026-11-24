@@ -21,6 +21,12 @@ export interface Env {
   TURNSTILE_SECRET?: string
   /** Solo para pruebas locales: "true" reemplaza los modelos por respuestas simuladas */
   DEV_FAKE_AI?: string
+  /** Bandeja omnicanal: un Durable Object por cliente (WebSockets de agentes, presencia y reparto) */
+  INBOX_HUB?: DurableObjectNamespace
+  /** Bandeja omnicanal: un Durable Object por conversación (WebSocket del visitante y alarma de espera) */
+  CONVERSATION_DO?: DurableObjectNamespace
 }
 
-export type Role = 'superadmin' | 'owner' | 'editor'
+/** owner y editor administran; supervisor y agent trabajan en la bandeja */
+export type Role = 'superadmin' | 'owner' | 'editor' | 'supervisor' | 'agent'
+export type TenantRole = Exclude<Role, 'superadmin'>

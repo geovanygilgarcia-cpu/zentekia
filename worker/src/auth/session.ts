@@ -7,7 +7,7 @@
   - CSRF: toda operación que cambia datos exige el encabezado X-CSRF con el token de la sesión.
   - TOTP obligatorio para superadmin y owners (TOTP_OBLIGATORIO="true").
 */
-import type { Env } from '../env'
+import type { Env, Role } from '../env'
 import { PlatformRepo } from '../db/platform-repo'
 import type { SessionRow, TenantRow, UserRow } from '../db/types'
 import { fail, randomToken, sha256Hex, clientIp } from '../lib/http'
@@ -97,7 +97,7 @@ export async function loadSession(env: Env, request: Request, kind: 'admin' | 'p
 }
 
 export interface Guard {
-  roles?: Array<'owner' | 'editor' | 'superadmin'>
+  roles?: Array<Role>
   write?: boolean
 }
 
@@ -116,7 +116,7 @@ export function guard(request: Request, env: Env, ctx: AuthContext | null, g: Gu
   if (g.roles) {
     // En impersonación el superadmin actúa con permisos de owner pero en solo lectura
     const role = ctx.session.impersonator_id ? 'owner' : ctx.user.role
-    if (!g.roles.includes(role as 'owner')) fail(403, 'forbidden', 'Tu rol no tiene permiso para esto.')
+    if (!g.roles.includes(role)) fail(403, 'forbidden', 'Tu rol no tiene permiso para esto.')
   }
   return ctx
 }

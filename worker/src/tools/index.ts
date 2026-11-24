@@ -44,7 +44,15 @@ export function toolPrompts(cfg: AgentConfig): string[] {
   if (t.handoff?.enabled) {
     const cuando = t.handoff.when?.trim() || 'cuando el visitante pida hablar con una persona, esté molesto, o su caso necesite a alguien del equipo (quejas, casos especiales, algo que no puedes resolver).'
     const msg = t.handoff.message?.trim() || 'Le paso tu caso a una persona del equipo para que te dé seguimiento.'
-    out.push(`[HERRAMIENTA: PASAR A UNA PERSONA]
+    if (t.handoff.mode === 'inbox') {
+      // Bandeja: una persona toma la conversación en este mismo chat; no hace falta pedir datos antes
+      out.push(`[HERRAMIENTA: PASAR A UNA PERSONA]
+Puedes pasar esta conversación a una persona del equipo, que la atenderá en vivo en este mismo chat. Úsala ${cuando}
+- Dile algo breve como: "${msg.replace(/"/g, "'")}"
+- Para usarla, termina tu mensaje exactamente con ${HANDOFF_MARK} (en una línea aparte). El visitante no verá esa marca.
+- Úsala una sola vez por conversación, no prometas tiempos de respuesta y nunca menciones la marca.`)
+    } else
+      out.push(`[HERRAMIENTA: PASAR A UNA PERSONA]
 Puedes avisar al equipo para que una persona tome la conversación. Úsala ${cuando}
 - Antes, pide un nombre y un medio de contacto (teléfono o correo) si todavía no los tienes, para que puedan buscarlo.
 - Dile algo como: "${msg.replace(/"/g, "'")}"

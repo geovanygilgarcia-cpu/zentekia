@@ -169,7 +169,8 @@ export async function analyzeConversation(env: Env, tenant: TenantRow, repo: Ten
   const conv = await repo.conversation(convId)
   if (!conv) return { ok: false, error: 'not_found' }
   const startedAt = Date.now()
-  const msgs = (await repo.messages(convId, 400)).filter((m) => m.content && m.content !== '(Llamada sin conversación)')
+  // Solo la conversación (sin notas internas, eventos ni avisos de la bandeja)
+  const msgs = (await repo.messages(convId, 400)).filter((m) => m.content && m.content !== '(Llamada sin conversación)' && (m.kind ?? 'text') === 'text' && m.role !== 'system')
   const userText = msgs.filter((m) => m.role === 'user').map((m) => m.content).join('\n')
   if (!userText.trim()) {
     await repo.saveAnalysis(convId, { ...heuristic(''), lead_status: 'none', lead_score: 0 }, startedAt)

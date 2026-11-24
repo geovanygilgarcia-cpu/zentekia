@@ -66,6 +66,8 @@ export default function ChatPanel({
   disabled,
   preview,
   onCall,
+  /** Texto del encabezado cuando atiende o se espera a una persona (bandeja) */
+  handler,
 }) {
   const t = T[language] || T.es
   const [text, setText] = useState('')
@@ -101,7 +103,7 @@ export default function ChatPanel({
         </div>
         <div class="zw-titles">
           <div class="zw-title">{title}</div>
-          <div class="zw-subtitle zw-mono">{offline ? t.offline : theme.header_subtitle || t.online}</div>
+          <div class="zw-subtitle zw-mono">{handler ? handler : offline ? t.offline : theme.header_subtitle || t.online}</div>
         </div>
         {onCall && (
           <button class="zw-call" type="button" title={t.callTitle} aria-label={t.callTitle} onClick={onCall}>
@@ -117,16 +119,22 @@ export default function ChatPanel({
       </header>
 
       <div class="zw-list" ref={listRef} role="log" aria-live="polite" aria-relevant="additions">
-        {messages.map((m, i) => (
-          <div key={m.id} class={`zw-msg zw-${m.role}${m.error ? ' zw-err' : ''}`}>
-            {m.role === 'assistant' && (i === 0 || messages[i - 1].role !== 'assistant') && <div class="zw-who zw-mono">{theme.assistant_name}</div>}
-            <div class="zw-bubble">{m.role === 'assistant' ? <Markdown text={m.content} /> : m.content}</div>
+        {messages.map((m, i) =>
+          m.role === 'system' ? (
+            // Aviso de la bandeja (te comunico con una persona, se unió, vuelve el asistente…)
+            <div key={m.id} class="zw-msg zw-system" role="status">
+              <span>{m.content}</span>
+            </div>
+          ) : (
+          <div key={m.id} class={`zw-msg zw-${m.role}${m.sender === 'human' ? ' zw-human' : ''}${m.error ? ' zw-err' : ''}`}>
+            {m.role === 'assistant' && (i === 0 || messages[i - 1].role !== 'assistant' || (messages[i - 1].author || null) !== (m.author || null)) && <div class="zw-who zw-mono">{m.author || theme.assistant_name}</div>}
+            <div class="zw-bubble">{m.role === 'assistant' && m.sender !== 'human' ? <Markdown text={m.content} /> : m.content}</div>
             {m.role === 'assistant' && m.sources?.length > 0 && (
               <div class="zw-sources">
                 {t.sources}: {m.sources.map((s, k) => (s.url ? <a key={k} href={s.url} target="_blank" rel="noopener noreferrer nofollow">{s.name}</a> : <span key={k}>{s.name}</span>)).reduce((a, b) => [a, ' · ', b])}
               </div>
             )}
-            {m.role === 'assistant' && onFeedback && m.final && !ended && (
+            {m.role === 'assistant' && m.sender !== 'human' && onFeedback && m.final && !ended && (
               <div class="zw-fb">
                 <button type="button" aria-pressed={m.feedback === 1} aria-label={t.useful} class={m.feedback === 1 ? 'on' : ''} onClick={() => onFeedback(m.id, m.feedback === 1 ? null : 1)}>
                   <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M2 21h4V9H2v12zm20-11a2 2 0 0 0-2-2h-6.3l1-4.6v-.3a1.5 1.5 0 0 0-.5-1L13.2 1 6.6 7.6A2 2 0 0 0 6 9v10a2 2 0 0 0 2 2h9a2 2 0 0 0 1.8-1.2l3-7.1c.1-.2.2-.5.2-.7v-2z" /></svg>

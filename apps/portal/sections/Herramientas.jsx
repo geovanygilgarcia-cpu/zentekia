@@ -33,6 +33,17 @@ function fromAgent(a) {
       when: t.handoff?.when || '',
       message: t.handoff?.message || '',
       email: t.handoff?.email !== false,
+      // Bandeja en vivo
+      mode: t.handoff?.mode === 'inbox' ? 'inbox' : 'notify',
+      keywords: (t.handoff?.keywords || []).join(', '),
+      max_ai_turns: t.handoff?.max_ai_turns ?? 0,
+      queue_id: t.handoff?.queue_id || '',
+      waiting_message: t.handoff?.waiting_message || '',
+      assigned_message: t.handoff?.assigned_message || '',
+      handback_message: t.handoff?.handback_message || '',
+      no_agents: t.handoff?.no_agents === 'ai' ? 'ai' : 'wait',
+      no_agents_message: t.handoff?.no_agents_message || '',
+      max_wait_min: t.handoff?.max_wait_min ?? 5,
     },
     booking: { enabled: Boolean(t.booking?.enabled), url: t.booking?.url || '', when: t.booking?.when || '' },
     whatsapp: { enabled: Boolean(t.whatsapp?.enabled), number: t.whatsapp?.number || '', message: t.whatsapp?.message || '' },
@@ -57,7 +68,26 @@ function toPayload(id, v) {
     case 'end_chat':
       return { auto_end: v.enabled, end_when: v.end_when }
     case 'handoff':
-      return { tools: { handoff: { enabled: v.enabled, when: v.when, message: v.message, email: v.email } } }
+      return {
+        tools: {
+          handoff: {
+            enabled: v.enabled,
+            when: v.when,
+            message: v.message,
+            email: v.email,
+            mode: v.mode,
+            keywords: v.keywords.split(',').map((x) => x.trim()).filter((x) => x.length >= 3).slice(0, 20),
+            max_ai_turns: Math.max(0, Math.min(50, Number(v.max_ai_turns) || 0)),
+            queue_id: v.queue_id || null,
+            waiting_message: v.waiting_message,
+            assigned_message: v.assigned_message,
+            handback_message: v.handback_message,
+            no_agents: v.no_agents,
+            no_agents_message: v.no_agents_message,
+            max_wait_min: Math.max(0, Math.min(240, Number(v.max_wait_min) || 0)),
+          },
+        },
+      }
     case 'booking':
       return { tools: { booking: { enabled: v.enabled, url: v.url.trim(), when: v.when } } }
     case 'whatsapp':
@@ -112,8 +142,13 @@ function ToolCard({ icon, title, desc, tag, value, saved, onChange, onSave, busy
   )
 }
 
-export default function Herramientas({ api, agentId, readOnly }) {
+export default function Herramientas({ api, agentId, readOnly, ov }) {
   const { data, error, setData } = useLoad(() => api.get(`agents/${agentId}`), [agentId])
+  // Colas de la bandeja (para elegir a cuál escala este asistente)
+  const [inbox, setInbox] = useState({ ready: Boolean(ov?.inbox_ready), queues: [] })
+  useEffect(() => {
+    if (ov?.inbox_ready) api.get('inbox/queues').then((r) => setInbox({ ready: true, queues: r.queues })).catch(() => {})
+  }, [ov?.inbox_ready])
   const [saved, setSaved] = useState(null)
   const [f, setF] = useState(null)
   const [busy, run] = useAction()
@@ -257,6 +292,55 @@ export default function Herramientas({ api, agentId, readOnly }) {
             <input type="checkbox" checked={f.handoff.email} onChange={setField('handoff', 'email')} disabled={readOnly} />
             Avisar por correo a los propietarios (además del aviso en el portal)
           </label>
+          <Field label="¿Qué pasa al pasar a una persona?">
+            <select value={f.handoff.mode} onChange={setField('handoff', 'mode')} disabled={readOnly}>
+              <option value="notify">Solo avisar a mi equipo (te contactan después)</option>
+              <option value="inbox" disabled={!inbox.ready && f.handoff.mode !== 'inbox'}>Pasar a la Bandeja: una persona responde en vivo en el mismo chat</option>
+            </select>
+          </Field>
+          {!inbox.ready && <p class="small muted" style="margin:6px 0 0">La Bandeja en vivo todavía no está activa en tu cuenta.</p>}
+          {f.handoff.mode === 'inbox' && (
+            <div class="ib-tool">
+              <p class="small muted" style="margin:0 0 4px">Mientras una persona atiende, el asistente deja de responder. Tu equipo contesta desde <a href="#/bandeja">Bandeja</a>.</p>
+              <Field label="Frases con las que el visitante pide a una persona" hint="Separadas por coma. Escala de inmediato, sin pasar por la IA. Vacío = frases comunes («hablar con una persona», «agente humano»…).">
+                <input value={f.handoff.keywords} maxLength={1200} onInput={setField('handoff', 'keywords')} placeholder="hablar con una persona, quiero un asesor" />
+              </Field>
+              <div class="ib-tool-row">
+                <Field label="Escalar tras N respuestas de la IA" hint="0 = apagado">
+                  <input type="number" min="0" max="50" value={f.handoff.max_ai_turns} onInput={setField('handoff', 'max_ai_turns')} />
+                </Field>
+                <Field label="Cola">
+                  <select value={f.handoff.queue_id} onChange={setField('handoff', 'queue_id')} disabled={readOnly}>
+                    <option value="">Cola general</option>
+                    {inbox.queues.map((q) => <option key={q.id} value={q.id}>{q.name}</option>)}
+                  </select>
+                </Field>
+              </div>
+              <div class="ib-tool-row">
+                <Field label="Si no hay nadie disponible">
+                  <select value={f.handoff.no_agents} onChange={setField('handoff', 'no_agents')} disabled={readOnly}>
+                    <option value="wait">Se queda en la cola (deja su mensaje)</option>
+                    <option value="ai">Sigue atendiendo la IA</option>
+                  </select>
+                </Field>
+                <Field label="Espera máxima (min)" hint="Después aplica lo de la izquierda. 0 = sin límite">
+                  <input type="number" min="0" max="240" value={f.handoff.max_wait_min} onInput={setField('handoff', 'max_wait_min')} />
+                </Field>
+              </div>
+              <Field label="Mensaje mientras espera">
+                <input value={f.handoff.waiting_message} maxLength={300} onInput={setField('handoff', 'waiting_message')} placeholder="Te estoy comunicando con una persona del equipo. En un momento te atienden." />
+              </Field>
+              <Field label="Cuando alguien toma la conversación" hint="{agente} se cambia por el nombre de pila de quien atiende.">
+                <input value={f.handoff.assigned_message} maxLength={300} onInput={setField('handoff', 'assigned_message')} placeholder="{agente} se unió a la conversación." />
+              </Field>
+              <Field label="Si no hay nadie disponible, se le dice">
+                <input value={f.handoff.no_agents_message} maxLength={300} onInput={setField('handoff', 'no_agents_message')} placeholder={f.handoff.no_agents === 'ai' ? 'En este momento no hay personas disponibles, pero sigo aquí para ayudarte.' : 'En este momento no hay personas disponibles. Déjanos tu mensaje y te responderemos en cuanto sea posible.'} />
+              </Field>
+              <Field label="Cuando la conversación vuelve al asistente">
+                <input value={f.handoff.handback_message} maxLength={300} onInput={setField('handoff', 'handback_message')} placeholder="Te atiende de nuevo el asistente virtual." />
+              </Field>
+            </div>
+          )}
         </ToolCard>
 
         <ToolCard {...card('booking')} icon="calendar" title="Agendar citas" desc="Comparte la liga de tu calendario para que el visitante elija día y hora. Funciona con Calendly, Cal.com, Google Calendar o cualquier página de reservas.">

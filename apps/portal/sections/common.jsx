@@ -13,6 +13,7 @@ const EYEBROW = {
   Widget: 'Chat · Marca',
   Instalación: 'Chat · Integración',
   Conversaciones: 'Chat · Historial',
+  Bandeja: 'Cuenta · Atención en vivo',
   Reportes: 'Cuenta · Resultados',
   'Tus precios': 'Cuenta · Reventa',
   'Consumo y costos': 'Cuenta · Facturación',
