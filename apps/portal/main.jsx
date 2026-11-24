@@ -25,6 +25,7 @@ import Proximamente from './sections/Proximamente.jsx'
 import Voz from './sections/Voz.jsx'
 import MiCuenta from './sections/MiCuenta.jsx'
 import Bandeja from './sections/Bandeja.jsx'
+import WhatsApp from './sections/WhatsApp.jsx'
 import { Icon } from './sections/icons.jsx'
 import './portal.css'
 
@@ -160,7 +161,14 @@ function Portal({ me, logout, reloadMe }) {
     if (!acc) activeNav = 'asistentes'
   } else if (r.section === 'voz' || r.section === 'whatsapp') {
     channel = r.section
-    view = r.section === 'voz' && ov.voice_available ? <Voz key={'voz' + agent.id} {...props} /> : <Proximamente key={r.section} channel={r.section} {...props} />
+    view =
+      r.section === 'voz' && ov.voice_available ? (
+        <Voz key={'voz' + agent.id} {...props} />
+      ) : r.section === 'whatsapp' && !isGuide ? (
+        <WhatsApp key={'wa' + agent.id} {...props} />
+      ) : (
+        <Proximamente key={r.section} channel={r.section} {...props} />
+      )
   } else if (r.section === 'bienvenida') {
     view = <Wizard {...props} done={() => { loadOverview(); go('resumen') }} />
   } else {
@@ -169,6 +177,7 @@ function Portal({ me, logout, reloadMe }) {
     view = <s.C key={s.id + agent.id} {...props} />
   }
 
+  const channelReady = channel === 'voz' ? ov.voice_available : channel === 'whatsapp' ? !isGuide : true
   const NavLink = ({ s, href }) => (
     <a class={'nv' + (activeNav === s.id ? ' on' : '')} href={href} aria-current={activeNav === s.id ? 'page' : undefined}>
       <span class="nv-ic" aria-hidden="true"><Icon name={s.icon} /></span>
@@ -208,7 +217,7 @@ function Portal({ me, logout, reloadMe }) {
                 {channel === 'chat' ? (
                   chatSections.map((s) => <NavLink key={s.id} s={s} href={`${base}/${s.id}`} />)
                 ) : (
-                  <a class="nv on" href={`${base}/${channel}`} aria-current="page"><span class="nv-ic" aria-hidden="true"><Icon name={channel === 'voz' && ov.voice_available ? 'voz' : 'clock'} /></span>{channel === 'voz' && ov.voice_available ? 'Configuración' : 'Próximamente'}</a>
+                  <a class="nv on" href={`${base}/${channel}`} aria-current="page"><span class="nv-ic" aria-hidden="true"><Icon name={channelReady ? (channel === 'voz' ? 'voz' : 'whatsapp') : 'clock'} /></span>{channelReady ? 'Configuración' : 'Próximamente'}</a>
                 )}
                 {accountSections.length > 0 && <div class="nv-group">Cuenta</div>}
                 {accountSections.map((s) => <NavLink key={s.id} s={s} href={`${base}/${s.id}`} />)}
@@ -237,7 +246,7 @@ function Portal({ me, logout, reloadMe }) {
                     <a key={c.id} role="tab" aria-selected={on} class={'ch-tab' + (on ? ' on' : '')} href={`${base}/${c.home}`}>
                       <Icon name={c.id} size={16} />
                       {c.label}
-                      {state === 'active' ? <span class="ch-live">Activo</span> : state === 'available' ? <span class="ch-soon ch-avail">Sin activar</span> : state === 'off' ? <span class="ch-soon ch-off">Apagado</span> : <span class="ch-soon">Próximamente</span>}
+                      {state === 'active' ? <span class="ch-live">Activo</span> : state === 'error' ? <span class="ch-soon ch-off">Con error</span> : state === 'available' ? <span class="ch-soon ch-avail">Sin activar</span> : state === 'off' ? <span class="ch-soon ch-off">Apagado</span> : <span class="ch-soon">Próximamente</span>}
                     </a>
                   )
                 })}

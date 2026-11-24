@@ -19,6 +19,8 @@ import { processSource } from './rag/kb'
 import { sweepVoiceCalls } from './routes/voice'
 import { sweepAnalysis } from './leads/analyze'
 import { inboxRoutes } from './routes/inbox'
+import { whatsappRoutes } from './routes/whatsapp'
+import { handleWaWebhook } from './channels/process'
 import { asset } from './assets'
 import { FAVICON_B64 } from './favicon'
 
@@ -54,6 +56,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
   }
 
   await ensureSchema(env.DB)
+
+  // Webhooks de WhatsApp (BSP): POST /v1/wa/<proveedor>/<canal>; la firma se valida con el secreto del canal
+  if ((area.kind === 'combined' || area.kind === 'chat') && request.method === 'POST') {
+    const wm = path.match(/^\/v1\/wa\/(360dialog|ycloud)\/([0-9a-f-]{36})$/)
+    if (wm) return handleWaWebhook(env, request, ctx, wm[1]!, wm[2]!)
+  }
 
   // Widget y API pública
   if (area.kind === 'combined' || area.kind === 'chat') {
@@ -100,6 +108,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
     }
     if (rest.startsWith('/v1/auth/')) return authRoutes(env, request, 'portal', tenant, rest.slice('/v1/auth/'.length))
     if (rest.startsWith('/v1/inbox/')) return inboxRoutes(env, request, url, tenant, rest.slice('/v1/inbox/'.length), ctx)
+    if (rest.startsWith('/v1/whatsapp/')) return whatsappRoutes(env, request, url, tenant, rest.slice('/v1/whatsapp/'.length))
     if (rest.startsWith('/v1/')) return portalRoutes(env, request, url, tenant, rest.slice('/v1/'.length))
     if (request.method === 'GET') return spaPage(env, url, 'portal', { base: `${base}/v1`, slug, tenant: tenant.name })
   }

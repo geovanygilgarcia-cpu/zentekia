@@ -28,6 +28,8 @@ const STATUS = {
 const PRESENCE = { online: 'En línea', away: 'Ausente', offline: 'Desconectado' }
 const REASON = { ai_tool: 'El asistente pidió a una persona', keyword: 'El visitante pidió una persona', max_turns: 'Máximo de respuestas de la IA', manual: 'Intervención manual' }
 const ROLE = { owner: 'Owner', editor: 'Editor', supervisor: 'Supervisor', agent: 'Agente' }
+const DELIVERY = { sent: 'Enviado', delivered: 'Entregado', read: 'Leído', failed: 'No se entregó' }
+const TICK = { sent: '✓', delivered: '✓✓', read: '✓✓', failed: '⚠ no enviado' }
 
 const ago = (t) => {
   if (!t) return ''
@@ -236,7 +238,12 @@ function Inbox({ api, boot, reloadBoot, readOnly }) {
             {list.map((c) => (
               <button key={c.id} class={'conv-item ib-item' + (sel === c.id ? ' on' : '')} onClick={() => setSel(c.id)}>
                 <div class="ib-item-top">
-                  <span class="conv-name">{who(c)}</span>
+                  <span class="conv-name">
+                    <span class={'ib-ch ' + (c.channel === 'whatsapp' ? 'ib-ch-wa' : 'ib-ch-web')} title={c.channel === 'whatsapp' ? 'WhatsApp' : 'Chat web'} style="margin-right:6px;vertical-align:-4px">
+                      <Icon name={c.channel === 'whatsapp' ? 'whatsapp' : 'chat'} size={12} />
+                    </span>
+                    {who(c)}
+                  </span>
                   <span class="small muted">{c.status === 'waiting_human' ? `espera ${ago(c.escalated_at)}` : ago(c.last_message_at)}</span>
                 </div>
                 {c.last_text && <div class="conv-sum">{c.last_text}</div>}
@@ -295,8 +302,9 @@ function Conversation({ api, boot, d, readOnly, reload, onBack, onContact }) {
   const inputRef = useRef(null)
 
   useEffect(() => {
-    if (!d.can_reply && mode === 'text') setMode('note')
-  }, [d.can_reply])
+    // WhatsApp fuera de la ventana de 24 h: solo plantillas
+    if (!d.can_reply && mode === 'text') setMode(d.can_template ? 'template' : 'note')
+  }, [d.can_reply, d.can_template])
   useEffect(() => {
     const el = listRef.current
     if (el) el.scrollTop = el.scrollHeight
@@ -309,7 +317,7 @@ function Conversation({ api, boot, d, readOnly, reload, onBack, onContact }) {
   const send = async (e) => {
     e?.preventDefault()
     const v = text.trim()
-    if (!v || busy) return
+    if (!v || busy || mode === 'template') return
     const r = await run(() => api.post(`inbox/conversations/${c.id}/messages`, { type: mode, text: v }))
     if (r) {
       setText('')
@@ -348,6 +356,18 @@ function Conversation({ api, boot, d, readOnly, reload, onBack, onContact }) {
         </div>
       </header>
 
+      {d.channel?.type === 'whatsapp' && (
+        <div class={'ib-window' + (d.channel.window_open ? '' : ' closed')}>
+          <Icon name="whatsapp" size={14} />
+          <span>WhatsApp {d.channel.contact} → {d.channel.phone}</span>
+          <span>·</span>
+          <span>
+            {d.channel.window_open
+              ? `Ventana abierta: puedes escribir hasta ${new Date(d.channel.window_expires_at).toLocaleString('es-MX', { dateStyle: 'short', timeStyle: 'short' })}`
+              : 'Ventana de 24 h cerrada: solo se pueden mandar plantillas aprobadas'}
+          </span>
+        </div>
+      )}
       <div class="ib-timeline transcript" ref={listRef} role="log" aria-live="polite">
         {d.messages.map((m) => {
           if (m.kind === 'event') return <div key={m.id} class="ib-event"><span>{m.content}</span><time>{ago(m.created_at)}</time></div>
@@ -365,7 +385,15 @@ function Conversation({ api, boot, d, readOnly, reload, onBack, onContact }) {
             <div key={m.id} class={'tmsg ib-' + cls}>
               {cls !== 'contact' && <div class="ib-from">{cls === 'human' ? m.author_name || 'Agente' : 'Asistente IA'}</div>}
               {cls === 'ai' ? <Markdown text={m.content} /> : <div style="white-space:pre-wrap">{m.content}</div>}
-              <div class="tmeta">{date(m.created_at)}</div>
+              {m.media?.stored && (
+                <a class="ib-media" href={`${api.base}/inbox/conversations/${c.id}/media/${m.id}`} target="_blank" rel="noopener noreferrer">
+                  <Icon name="link" size={13} /> Ver adjunto
+                </a>
+              )}
+              <div class="tmeta">
+                {date(m.created_at)}
+                {cls !== 'contact' && m.delivery && <span class={'ib-tick ' + m.delivery} title={DELIVERY[m.delivery]}>{TICK[m.delivery]}</span>}
+              </div>
             </div>
           )
         })}
@@ -376,9 +404,15 @@ function Conversation({ api, boot, d, readOnly, reload, onBack, onContact }) {
           <div class="ib-modes" role="tablist">
             <button type="button" role="tab" aria-selected={mode === 'text'} class={mode === 'text' ? 'on' : ''} disabled={!d.can_reply} onClick={() => setMode('text')}>Responder</button>
             <button type="button" role="tab" aria-selected={mode === 'note'} class={mode === 'note' ? 'on' : ''} onClick={() => setMode('note')}>Nota interna</button>
-            {!d.can_reply && <span class="small muted">{c.status === 'waiting_human' ? 'Toma la conversación para responder.' : c.status === 'ai_active' ? 'La atiende la IA.' : 'La atiende otra persona.'}</span>}
+            {d.can_template && <button type="button" role="tab" aria-selected={mode === 'template'} class={mode === 'template' ? 'on' : ''} onClick={() => setMode('template')}>Plantilla</button>}
+            {!d.can_reply && (
+              <span class="small muted">
+                {d.can_template ? 'Ventana de 24 h cerrada: manda una plantilla.' : c.status === 'waiting_human' ? 'Toma la conversación para responder.' : c.status === 'ai_active' ? 'La atiende la IA.' : 'La atiende otra persona.'}
+              </span>
+            )}
           </div>
-          {quick.length > 0 && (
+          {mode === 'template' && <TemplatePicker api={api} conv={c} done={reload} />}
+          {mode !== 'template' && quick.length > 0 && (
             <ul class="ib-quick" role="listbox" aria-label="Respuestas rápidas">
               {quick.map((q) => (
                 <li key={q.id}>
@@ -389,7 +423,7 @@ function Conversation({ api, boot, d, readOnly, reload, onBack, onContact }) {
               ))}
             </ul>
           )}
-          <div class="ib-input">
+          <div class="ib-input" hidden={mode === 'template'}>
             <label class="sr-only" for="ib-text">{mode === 'note' ? 'Nota interna' : 'Respuesta'}</label>
             <textarea
               id="ib-text"
@@ -413,6 +447,56 @@ function Conversation({ api, boot, d, readOnly, reload, onBack, onContact }) {
       )}
       {transfer && <TransferDialog api={api} boot={boot} c={c} assignOnly={me.lead && !mine} onClose={() => setTransfer(false)} done={() => { setTransfer(false); reload() }} />}
     </>
+  )
+}
+
+/** WhatsApp: plantillas aprobadas del número, con sus variables (va dentro del formulario del chat: sin <form>) */
+function TemplatePicker({ api, conv, done }) {
+  const [list, setList] = useState(null)
+  const [err, setErr] = useState(null)
+  const [sel, setSel] = useState('')
+  const [params, setParams] = useState([])
+  const [busy, run] = useAction()
+  useEffect(() => {
+    api.get(`inbox/conversations/${conv.id}/templates`).then((r) => setList(r.items)).catch((e) => setErr(e.message))
+  }, [conv.id])
+  if (err) return <div class="alert alert-warn">{err}</div>
+  if (!list) return <div class="small muted">Cargando plantillas…</div>
+  if (!list.length) return <div class="small muted">Este número no tiene plantillas aprobadas. Créalas y apruébalas en tu proveedor de WhatsApp.</div>
+  const t = list.find((x) => `${x.name}|${x.language}` === sel)
+  const preview = t ? t.body.replace(/\{\{\s*(\d+)\s*\}\}/g, (_m, n) => params[Number(n) - 1] || `{{${n}}}`) : ''
+  const send = async () => {
+    if (!t) return
+    const r = await run(() => api.post(`inbox/conversations/${conv.id}/template`, { name: t.name, language: t.language, params }), 'Plantilla enviada')
+    if (r) {
+      setSel('')
+      setParams([])
+      done()
+    }
+  }
+  return (
+    <div class="ib-tpl">
+      <label class="sr-only" for="ib-tpl-sel">Plantilla</label>
+      <select id="ib-tpl-sel" value={sel} onChange={(e) => { setSel(e.target.value); const x = list.find((y) => `${y.name}|${y.language}` === e.target.value); setParams(Array(x?.variables || 0).fill('')) }}>
+        <option value="">Elige una plantilla aprobada…</option>
+        {list.map((x) => (
+          <option key={`${x.name}|${x.language}`} value={`${x.name}|${x.language}`} disabled={!x.supported}>
+            {x.name} · {x.language}{x.category ? ` · ${x.category.toLowerCase()}` : ''}{x.supported ? '' : ' (no compatible aún)'}
+          </option>
+        ))}
+      </select>
+      {t && (
+        <>
+          {params.map((v, i) => (
+            <input key={i} value={v} maxLength={1000} placeholder={`Dato {{${i + 1}}}`} aria-label={`Dato ${i + 1} de la plantilla`} onInput={(e) => setParams(params.map((p, k) => (k === i ? e.target.value : p)))} />
+          ))}
+          <div class="ib-tpl-preview">{preview}</div>
+          <div style="display:flex;justify-content:flex-end">
+            <button type="button" class="b b-primary" disabled={busy || params.some((p) => !p.trim())} onClick={send}>Enviar plantilla</button>
+          </div>
+        </>
+      )}
+    </div>
   )
 }
 

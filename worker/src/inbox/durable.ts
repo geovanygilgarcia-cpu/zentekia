@@ -16,6 +16,8 @@
 */
 import type { Env } from '../env'
 import { onAgentGone, onWaitTimeout, runDispatch } from './core'
+import { processInbound } from '../channels/process'
+import type { WaInbound } from '../channels/whatsapp'
 
 const GRACE_MS = 60_000
 
@@ -149,6 +151,8 @@ interface RoomTimer {
 }
 
 export class ConversationDO implements DurableObject {
+  private chain: Promise<unknown> = Promise.resolve()
+
   constructor(
     private state: DurableObjectState,
     private env: Env,
@@ -156,6 +160,19 @@ export class ConversationDO implements DurableObject {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url)
+
+    // WhatsApp: mensajes de un contacto, uno a la vez y en orden de llegada.
+    // Se responde de inmediato; el procesamiento (IA incluida) sigue en este objeto.
+    if (url.pathname === '/process' && request.method === 'POST') {
+      const b = (await request.json().catch(() => null)) as { kind?: string; tenant_id?: string; channel_id?: string; event?: WaInbound } | null
+      if (!b || b.kind !== 'wa_inbound' || !b.tenant_id || !b.channel_id || !b.event) return jsonRes({ error: 'invalid' }, 400)
+      const ctx = { waitUntil: (p: Promise<unknown>) => this.state.waitUntil(p), passThroughOnException: () => {}, props: {} } as unknown as ExecutionContext
+      const job = () => processInbound(this.env, ctx, b.tenant_id!, b.channel_id!, b.event!)
+      const run = this.chain.then(job, job)
+      this.chain = run.catch((e) => console.error(JSON.stringify({ level: 'error', msg: 'wa_inbound', tenant_id: b.tenant_id, error: e instanceof Error ? e.message : String(e) })))
+      this.state.waitUntil(this.chain)
+      return jsonRes({ ok: true }, 202)
+    }
 
     if (url.pathname === '/ws') {
       if (request.headers.get('Upgrade') !== 'websocket') return jsonRes({ error: 'upgrade' }, 426)

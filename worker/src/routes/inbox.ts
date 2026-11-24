@@ -29,7 +29,11 @@ import type { TenantRow } from '../db/types'
 import { portalUrl } from '../lib/hosts'
 import { clientIp, fail, json, readJson } from '../lib/http'
 import { match } from '../lib/router'
-import { addNote, assignTo, closeByUser, handbackByUser, humanReply, inboxEvent, InboxError, inboxReady, requestDispatch, take, transferToQueue } from '../inbox/core'
+import { addNote, assignTo, closeByUser, handbackByUser, humanReply, inboxEvent, InboxError, inboxReady, requestDispatch, sendWaTemplate, take, transferToQueue, waTemplatesFor } from '../inbox/core'
+import { ChannelRepo } from '../db/channel-repo'
+import { parseJson } from '../db/types'
+import { contactNumber, isWhatsApp, windowOpen, type WaConvRef } from '../channels/outbound'
+import { WaError } from '../channels/whatsapp'
 
 const INBOX_ROLES = ['owner', 'editor', 'supervisor', 'agent'] as const
 const VIEWS: InboxView[] = ['mine', 'unassigned', 'waiting', 'ai', 'all', 'closed']
@@ -129,6 +133,7 @@ export async function inboxRoutes(env: Env, request: Request, url: URL, tenant: 
         queue_id: x.queue_id,
         queue_name: x.queue_name,
         escalation_reason: x.escalation_reason,
+        channel: x.channel === 'whatsapp' ? 'whatsapp' : 'web',
       })),
       counts: await inbox.counts(c.user.id, q),
     })
@@ -139,20 +144,31 @@ export async function inboxRoutes(env: Env, request: Request, url: URL, tenant: 
     const conv = await load(c, p.id!)
     const repo = new TenantRepo(env.DB, tenant.id)
     const [timeline, agent, history] = await Promise.all([inbox.timeline(conv.id), repo.agent(conv.agent_id), inbox.visitorHistory(conv.visitor_id, conv.id)])
+    const wa = conv as InboxConversation & WaConvRef
+    const isWa = isWhatsApp(wa)
+    const ch = isWa ? await new ChannelRepo(env.DB, tenant.id).get(wa.channel_id!) : null
+    const mine = conv.status === 'human_active' && conv.assignee_user_id === c.user.id && !c.session.read_only
     return json({
       conversation: { ...conv, agent_name: agent?.name ?? null },
-      messages: timeline.map((x) => ({
-        id: x.id,
-        role: x.role,
-        sender: x.sender,
-        kind: x.kind,
-        content: x.content,
-        created_at: x.created_at,
-        author_id: x.author_id,
-        author_name: x.author_name || x.author_email,
-      })),
+      messages: timeline.map((x) => {
+        const media = parseJson<{ kind?: string; mime?: string; filename?: string; r2?: string } | null>((x as { media_json?: string | null }).media_json, null)
+        return {
+          id: x.id,
+          role: x.role,
+          sender: x.sender,
+          kind: x.kind,
+          content: x.content,
+          created_at: x.created_at,
+          author_id: x.author_id,
+          author_name: x.author_name || x.author_email,
+          delivery: (x as { delivery_status?: string | null }).delivery_status ?? null,
+          media: media ? { kind: media.kind ?? 'document', mime: media.mime ?? null, filename: media.filename ?? null, stored: Boolean(media.r2) } : null,
+        }
+      }),
       history,
-      can_reply: conv.status === 'human_active' && conv.assignee_user_id === c.user.id && !c.session.read_only,
+      channel: isWa ? { type: 'whatsapp', provider: ch?.provider ?? null, phone: ch?.display_phone || (ch ? `+${ch.phone}` : null), contact: `+${contactNumber(wa)}`, window_open: windowOpen(wa), window_expires_at: wa.wa_window_expires_at ?? null } : { type: 'web' },
+      can_reply: mine && (!isWa || windowOpen(wa)),
+      can_template: mine && isWa,
     })
   }
 
@@ -166,6 +182,46 @@ export async function inboxRoutes(env: Env, request: Request, url: URL, tenant: 
       else id = (await humanReply(env, tenant.id, conv.id, c.user, b.text)).id
     })
     return json({ ok: true, id })
+  }
+
+  /* ---------- WhatsApp: plantillas y adjuntos ---------- */
+  if ((p = match('conversations/:id/templates', sub)) && m === 'GET') {
+    const c = any()
+    const conv = await load(c, p.id!)
+    try {
+      const list = await waTemplatesFor(env, tenant.id, conv as InboxConversation & WaConvRef)
+      return json({ items: list })
+    } catch (e) {
+      fail(502, 'templates', e instanceof WaError ? e.message : 'No se pudieron leer las plantillas del proveedor.')
+    }
+  }
+  if ((p = match('conversations/:id/template', sub)) && m === 'POST') {
+    const c = any()
+    const conv = await load(c, p.id!)
+    const b = await readJson(request, z.object({ name: z.string().trim().min(1).max(512), language: z.string().trim().min(2).max(15), params: z.array(z.string().max(1000)).max(20) }))
+    await wrap(() => sendWaTemplate(env, tenant.id, conv.id, c.user, b))
+    await audit(c, 'inbox.template_sent', { conversation_id: conv.id, template: b.name, language: b.language })
+    return json({ ok: true })
+  }
+  if ((p = match('conversations/:id/media/:mid', sub)) && m === 'GET') {
+    const c = any()
+    const conv = await load(c, p.id!)
+    const msg = await new ChannelRepo(env.DB, tenant.id).message(conv.id, p.mid!)
+    const media = parseJson<{ r2?: string; mime?: string; filename?: string } | null>(msg?.media_json, null)
+    if (!media?.r2 || !env.FILES || !media.r2.startsWith(`tenants/${tenant.id}/`)) fail(404, 'not_found', 'Adjunto no disponible.')
+    const obj = await env.FILES!.get(media!.r2!)
+    if (!obj) fail(404, 'not_found', 'Adjunto no disponible.')
+    const type = obj!.httpMetadata?.contentType || media!.mime || 'application/octet-stream'
+    // Se descarga como archivo (nunca se interpreta HTML/SVG dentro del portal)
+    return new Response(obj!.body, {
+      headers: {
+        'Content-Type': type,
+        'Content-Disposition': `${/^(image\/(png|jpeg|webp|gif)|audio\/|video\/)/.test(type) ? 'inline' : 'attachment'}; filename="${(media!.filename || 'adjunto').replace(/[^\w.\- ]/g, '_')}"`,
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, max-age=300',
+      },
+    })
   }
 
   if ((p = match('conversations/:id/take', sub)) && m === 'POST') {

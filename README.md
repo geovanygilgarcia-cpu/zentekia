@@ -65,8 +65,29 @@ atienden en vivo las conversaciones que la IA escala, con traspaso en los dos se
   (tiempo hasta asignar, primera respuesta, resueltas solo por la IA).
 - **API**: `worker/src/routes/inbox.ts`. Núcleo: `worker/src/inbox/core.ts`. Datos: `worker/src/db/inbox-repo.ts` (migración v9).
 
-Pendiente para fases siguientes: WhatsApp (fase 2), plantillas y flujos (fase 3), voz (fase 4), horarios por cola
-y la política «agendar devolución de llamada».
+## WhatsApp · fase 2 (360dialog y YCloud)
+
+Cada asistente puede tener un número de WhatsApp Business conectado con **360dialog** o **YCloud** (el cliente elige).
+
+- **Alta desde el portal** (asistente → pestaña WhatsApp, solo owner): el cliente pega la API key de su BSP,
+  elige el número y Zentekia registra el webhook solo. La llave y el secreto del webhook se guardan cifrados por cliente;
+  el portal solo ve los últimos 4 caracteres. Un número solo puede estar conectado una vez en toda la plataforma.
+- **Webhook** `POST /v1/wa/<360dialog|ycloud>/<canal>`: se valida la firma (YCloud: `YCloud-Signature`, HMAC con
+  tolerancia de 5 min; 360dialog: token propio en `X-Zentekia-Token` y, si se define `D360_PLATFORM_SECRET`,
+  también `x-360dialog-signature`) y se responde 200 de inmediato.
+- **Procesamiento**: cada contacto se procesa en orden en su propio `ConversationDO` (en lugar de Cloudflare Queues,
+  que requiere plan de pago). Deduplicación por id de WhatsApp: los reintentos del BSP no duplican mensajes ni respuestas.
+- **Mismo agente IA y misma bandeja**: el asistente contesta con su conocimiento y herramientas; el traspaso a personas,
+  colas, notas y reportes funcionan igual que en el chat web.
+- **Ventana de 24 h** (`conversations.wa_window_expires_at`): cada mensaje del cliente la renueva. Fuera de ella la bandeja
+  bloquea el texto libre y ofrece las **plantillas aprobadas** del número, con sus variables.
+- **Estados de entrega** (enviado, entregado, leído, fallido) en cada mensaje; solo avanzan.
+- **Adjuntos**: se guardan en R2 si el Worker tiene el binding `FILES` (hoy está comentado en `wrangler.toml`); sin R2 se
+  muestra el tipo y el texto del adjunto.
+- Código: `worker/src/channels/` (conectores, envío y procesamiento), `worker/src/routes/whatsapp.ts`, migración v10.
+
+Pendiente: Embedded Signup propio / Integrated Onboarding de 360dialog (spec 8.1), plantillas con imagen o botones
+con variables, gestor de plantillas y flujos (fase 3), voz (fase 4), horarios por cola y «agendar devolución de llamada».
 
 > **Publicar la bandeja requiere `npm run deploy`** (Opción A): crea los Durable Objects con su migración.
 > Si publicas pegando el archivo único (Opción B), todo lo anterior sigue funcionando, pero la Bandeja queda

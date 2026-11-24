@@ -339,8 +339,9 @@ export class TenantRepo {
   /* ---------- prospectos ---------- */
   async saveAnalysis(convId: string, a: Analysis, analyzedAt: number) {
     await this.q(
+      // Los datos de contacto que ya se conocen (p. ej. el teléfono y nombre de WhatsApp) no se borran si el análisis no los encuentra
       `UPDATE conversations SET summary = ?, lead_status = ?, lead_score = ?, interest = ?, next_step = ?,
-         contact_name = ?, contact_email = ?, contact_phone = ?, contact_company = ?, analyzed_at = ?, analysis_attempts = 0
+         contact_name = COALESCE(?, contact_name), contact_email = COALESCE(?, contact_email), contact_phone = COALESCE(?, contact_phone), contact_company = COALESCE(?, contact_company), analyzed_at = ?, analysis_attempts = 0
        WHERE tenant_id = ? AND id = ?`,
       a.summary, a.lead_status, a.lead_score, a.interest, a.next_step, a.contact_name, a.contact_email, a.contact_phone, a.contact_company, analyzedAt, this.tenantId, convId,
     ).run()

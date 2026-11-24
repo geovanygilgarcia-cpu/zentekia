@@ -664,3 +664,265 @@ test('bandeja: aislamiento entre clientes y colas', async () => {
   assert.ok((await B.br.get(`${pb()}/v1/inbox/quick-replies`)).json.items.every((x) => x.shortcut !== 'horario'))
   await A.br.put(`${pa()}/v1/agents/${agent.id}`, { tools: { handoff: { enabled: false, mode: 'notify', queue_id: null } } })
 })
+
+/* ---------- WhatsApp (fase 2): 360dialog y YCloud simulados en el puerto 8799 ---------- */
+
+const BSP = { sent: [], hooks: [], deleted: [] }
+const BSP_KEYS = { d360: 'd360_key_ok_123', yc: 'yc_key_ok_123' }
+const YC_SECRET = 'whsec_prueba_123'
+let bspServer = null
+function startBsp() {
+  let n = 0
+  bspServer = createServer((req, res) => {
+    let body = ''
+    req.on('data', (c) => (body += c))
+    req.on('end', () => {
+      const send = (status, j) => {
+        res.writeHead(status, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify(j))
+      }
+      const b = body ? JSON.parse(body) : null
+      const u = new URL(req.url, 'http://x')
+      if (u.pathname.startsWith('/d360/')) {
+        if (req.headers['d360-api-key'] !== BSP_KEYS.d360) return send(401, { error: { message: 'invalid key' } })
+        const p = u.pathname.slice(5)
+        if (p === '/health_status') return send(200, { health_status: { can_send_message: 'AVAILABLE' }, display_phone_number: '+52 55 1000 0001', quality_rating: 'GREEN', verified_name: 'Muebles A', status: 'CONNECTED' })
+        if (p === '/v1/configs/webhook' && req.method === 'POST') {
+          BSP.hooks.push({ provider: '360dialog', ...b })
+          return send(201, { message: 'ok', ...b })
+        }
+        if (p === '/messages' && req.method === 'POST') {
+          const id = `wamid.D${++n}`
+          BSP.sent.push({ provider: '360dialog', id, ...b })
+          return send(200, { messaging_product: 'whatsapp', messages: [{ id }] })
+        }
+        if (p === '/message_templates') return send(200, { data: [] })
+      }
+      if (u.pathname.startsWith('/yc/')) {
+        if (req.headers['x-api-key'] !== BSP_KEYS.yc) return send(401, { error: { message: 'invalid key' } })
+        const p = u.pathname.slice(3)
+        if (p === '/whatsapp/phoneNumbers')
+          return send(200, {
+            items: [
+              { id: 'pn1', phoneNumber: '+5215520000002', displayPhoneNumber: '+52 1 55 2000 0002', wabaId: 'waba1', verifiedName: 'Muebles A YC', qualityRating: 'GREEN', status: 'CONNECTED' },
+              { id: 'pn2', phoneNumber: '+5215520000003', displayPhoneNumber: '+52 1 55 2000 0003', wabaId: 'waba1', verifiedName: 'Muebles A 2', qualityRating: 'YELLOW', status: 'CONNECTED' },
+            ],
+          })
+        if (p === '/webhookEndpoints' && req.method === 'POST') {
+          BSP.hooks.push({ provider: 'ycloud', ...b })
+          return send(200, { id: 'we1', ...b, status: 'active', secret: YC_SECRET })
+        }
+        if (p.startsWith('/webhookEndpoints/') && req.method === 'DELETE') {
+          BSP.deleted.push(p)
+          return send(200, {})
+        }
+        if (p === '/whatsapp/messages/sendDirectly' && req.method === 'POST') {
+          const id = `wamid.Y${++n}`
+          BSP.sent.push({ provider: 'ycloud', id, ...b })
+          return send(200, { id: `yc_${n}`, wamid: id, status: 'accepted', from: b.from, to: b.to })
+        }
+        if (p === '/whatsapp/templates')
+          return send(200, {
+            items: [
+              { name: 'seguimiento', language: 'es_MX', category: 'UTILITY', status: 'APPROVED', components: [{ type: 'BODY', text: 'Hola {{1}}, ¿seguimos con tu pedido {{2}}?' }] },
+              { name: 'promo_img', language: 'es_MX', category: 'MARKETING', status: 'APPROVED', components: [{ type: 'HEADER', format: 'IMAGE' }, { type: 'BODY', text: 'Promo' }] },
+              { name: 'pendiente', language: 'es_MX', category: 'UTILITY', status: 'PENDING', components: [{ type: 'BODY', text: 'x' }] },
+            ],
+          })
+      }
+      send(404, { error: { message: 'not found' } })
+    })
+  })
+  return new Promise((ok) => bspServer.listen(8799, '127.0.0.1', ok))
+}
+
+/** Espera a que el BSP simulado reciba un envío que cumpla la condición */
+async function bspWait(pred, ms = 8000) {
+  const t0 = Date.now()
+  while (Date.now() - t0 < ms) {
+    const hit = BSP.sent.find(pred)
+    if (hit) return hit
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  return null
+}
+
+/** Webhook de YCloud firmado como lo firma YCloud: HMAC-SHA256(secreto, `${t}.${cuerpo}`) */
+function ycHook(channelId, payload, secret = YC_SECRET) {
+  const raw = JSON.stringify(payload)
+  const t = Math.floor(Date.now() / 1000)
+  const s = createHmac('sha256', secret).update(`${t}.${raw}`).digest('hex')
+  return fetch(`${BASE}/v1/wa/ycloud/${channelId}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'YCloud-Signature': `t=${t},s=${s}` }, body: raw })
+}
+let evtN = 0
+const ycInbound = (from, text, sendTime = new Date().toISOString()) => ({
+  id: `evt_${++evtN}`,
+  type: 'whatsapp.inbound_message.received',
+  apiVersion: 'v2',
+  createTime: sendTime,
+  whatsappInboundMessage: { id: `in_${evtN}`, wamid: `wamid.IN${evtN}.${run}`, wabaId: 'waba1', from: `+${from}`, to: '+5215520000002', sendTime, type: 'text', text: { body: text }, customerProfile: { name: 'Laura WhatsApp' } },
+})
+
+const WA = {}
+
+test('whatsapp: el cliente conecta su número de YCloud desde el portal y el asistente contesta', async () => {
+  await startBsp()
+  const agent = A.agents[2]
+  WA.agent = agent
+  // llave mala → mensaje claro; llave buena → sus números
+  const bad = await A.br.post(`${pa()}/v1/whatsapp/${agent.id}/numbers`, { provider: 'ycloud', api_key: 'yc_key_mala_000' })
+  assert.equal(bad.status, 400, bad.text)
+  const nums = await A.br.post(`${pa()}/v1/whatsapp/${agent.id}/numbers`, { provider: 'ycloud', api_key: BSP_KEYS.yc })
+  assert.equal(nums.status, 200, nums.text)
+  assert.equal(nums.json.numbers.length, 2)
+  // con dos números hay que elegir uno
+  assert.equal((await A.br.post(`${pa()}/v1/whatsapp/${agent.id}`, { provider: 'ycloud', api_key: BSP_KEYS.yc })).status, 400)
+  // un editor no conecta números; solo el owner
+  const con = await A.br.post(`${pa()}/v1/whatsapp/${agent.id}`, { provider: 'ycloud', api_key: BSP_KEYS.yc, phone: '+52 1 55 2000 0002' })
+  assert.equal(con.status, 200, con.text)
+  WA.ch = con.json.channel
+  assert.equal(WA.ch.phone, '5215520000002')
+  assert.equal(WA.ch.quality_rating, 'GREEN')
+  // se registró el webhook con nuestra URL y los eventos correctos
+  const hook = BSP.hooks.find((h) => h.provider === 'ycloud')
+  assert.ok(hook.url.endsWith(`/v1/wa/ycloud/${WA.ch.id}`), hook.url)
+  assert.deepEqual(hook.enabledEvents.sort(), ['whatsapp.inbound_message.received', 'whatsapp.message.updated'])
+  // la llave nunca regresa al portal
+  const g = await A.br.get(`${pa()}/v1/whatsapp/${agent.id}`)
+  assert.ok(!g.text.includes(BSP_KEYS.yc) && !g.text.includes(YC_SECRET))
+  assert.equal(g.json.channel.last4, BSP_KEYS.yc.slice(-4))
+  const ov = await A.br.get(`${pa()}/v1/overview`)
+  assert.equal(ov.json.agents.find((a) => a.id === agent.id).channels.whatsapp, 'active')
+  // el mismo número no se puede conectar dos veces
+  const dup = await A.br.post(`${pa()}/v1/whatsapp/${A.agents[3].id}`, { provider: 'ycloud', api_key: BSP_KEYS.yc, phone: '5215520000002' })
+  assert.equal(dup.status, 400, dup.text)
+
+  // firma mala o proveedor equivocado: no entra
+  assert.equal((await ycHook(WA.ch.id, ycInbound('5215511112222', 'hola'), 'whsec_otro')).status, 401)
+  assert.equal((await fetch(`${BASE}/v1/wa/360dialog/${WA.ch.id}`, { method: 'POST', body: '{}', headers: { 'Content-Type': 'application/json' } })).status, 404)
+
+  // mensaje entrante → la IA contesta por WhatsApp al número del cliente
+  const ev = ycInbound('5215511112222', 'Hola, ¿tienen sofás?')
+  assert.equal((await ycHook(WA.ch.id, ev)).status, 200)
+  const out = await bspWait((s) => s.provider === 'ycloud' && s.to === '+5215511112222' && /Respuesta simulada/.test(s.text?.body || ''))
+  assert.ok(out, `no se envió la respuesta: ${JSON.stringify(BSP.sent)}`)
+  assert.equal(out.from, '+5215520000002')
+  WA.aiWamid = out.id
+
+  // el BSP reintenta el mismo evento: no se duplica ni se contesta otra vez
+  const before = BSP.sent.length
+  assert.equal((await ycHook(WA.ch.id, ev)).status, 200)
+  await new Promise((r) => setTimeout(r, 1500))
+  assert.equal(BSP.sent.length, before, 'el reintento generó otra respuesta')
+  const list = await A.br.get(`${pa()}/v1/inbox/conversations?view=ai`)
+  const conv = list.json.items.find((x) => x.channel === 'whatsapp' && x.contact_phone === '5215511112222')
+  assert.ok(conv, list.text)
+  WA.conv = conv.id
+  const d = await A.br.get(`${pa()}/v1/inbox/conversations/${conv.id}`)
+  assert.equal(d.json.messages.filter((m) => m.role === 'user').length, 1)
+  assert.equal(d.json.conversation.contact_name, 'Laura WhatsApp')
+  assert.equal(d.json.channel.window_open, true)
+
+  // estados de entrega: entregado → leído (y un «entregado» tardío no lo regresa)
+  const st = (status) => ({ id: `evt_${++evtN}`, type: 'whatsapp.message.updated', apiVersion: 'v2', createTime: new Date().toISOString(), whatsappMessage: { id: 'x', wamid: WA.aiWamid, from: '+5215520000002', status } })
+  await ycHook(WA.ch.id, st('read'))
+  await ycHook(WA.ch.id, st('delivered'))
+  await new Promise((r) => setTimeout(r, 500))
+  const d2 = await A.br.get(`${pa()}/v1/inbox/conversations/${conv.id}`)
+  assert.equal(d2.json.messages.find((m) => m.role === 'assistant').delivery, 'read')
+
+  // B no ve el canal ni la conversación de A
+  assert.equal((await B.br.get(`${pb()}/v1/whatsapp/${agent.id}`)).status, 404)
+  assert.equal((await B.br.get(`${pb()}/v1/inbox/conversations/${conv.id}`)).status, 404)
+})
+
+test('whatsapp: bandeja con traspaso, ventana de 24 h y plantillas', async () => {
+  const agent = WA.agent
+  assert.equal((await A.br.put(`${pa()}/v1/agents/${agent.id}`, { tools: { handoff: { enabled: true, mode: 'inbox', no_agents: 'wait', max_wait_min: 0 } } })).status, 200)
+  // el cliente pide una persona por WhatsApp: la IA no contesta, le llega el aviso de espera
+  const sentBefore = BSP.sent.length
+  assert.equal((await ycHook(WA.ch.id, ycInbound('5215511112222', 'quiero hablar con una persona'))).status, 200)
+  assert.ok(await bspWait((s) => BSP.sent.indexOf(s) >= sentBefore && /comunicando con una persona/.test(s.text?.body || '')), 'no llegó el aviso de espera')
+  await new Promise((r) => setTimeout(r, 500))
+  assert.ok(!BSP.sent.slice(sentBefore).some((s) => /Respuesta simulada/.test(s.text?.body || '')), 'la IA respondió estando en espera')
+  // el owner la toma y contesta: sale por WhatsApp con su texto
+  assert.equal((await A.br.post(`${pa()}/v1/inbox/conversations/${WA.conv}/take`)).status, 200)
+  const r = await A.br.post(`${pa()}/v1/inbox/conversations/${WA.conv}/messages`, { type: 'text', text: 'Hola Laura, soy del equipo. ¿Qué modelo te interesa?' })
+  assert.equal(r.status, 200, r.text)
+  assert.ok(await bspWait((s) => s.to === '+5215511112222' && /soy del equipo/.test(s.text?.body || '')))
+  // nota interna: nunca sale por WhatsApp
+  await A.br.post(`${pa()}/v1/inbox/conversations/${WA.conv}/messages`, { type: 'note', text: 'NOTA-WA-SECRETA' })
+  await new Promise((r2) => setTimeout(r2, 300))
+  assert.ok(!BSP.sent.some((s) => JSON.stringify(s).includes('NOTA-WA-SECRETA')))
+  await A.br.post(`${pa()}/v1/inbox/conversations/${WA.conv}/close`)
+
+  // contacto cuyo último mensaje fue hace 25 h: fuera de la ventana solo plantillas
+  const old = new Date(Date.now() - 25 * 3600_000).toISOString()
+  await ycHook(WA.ch.id, ycInbound('5215533334444', 'necesito hablar con una persona', old))
+  let c2 = null
+  for (let i = 0; i < 40 && !c2; i++) {
+    await new Promise((r2) => setTimeout(r2, 150))
+    c2 = (await A.br.get(`${pa()}/v1/inbox/conversations?view=waiting`)).json.items.find((x) => x.contact_phone === '5215533334444')
+  }
+  if (!c2) {
+    const dbg = {}
+    for (const v of ['ai', 'all', 'closed', 'waiting']) dbg[v] = (await A.br.get(`${pa()}/v1/inbox/conversations?view=${v}`)).json.items.filter((x) => x.channel === 'whatsapp').map((x) => [x.contact_phone, x.status, x.last_text])
+    assert.fail(`no llegó la conversación vieja: ${JSON.stringify(dbg)}`)
+  }
+  assert.equal((await A.br.post(`${pa()}/v1/inbox/conversations/${c2.id}/take`)).status, 200)
+  const d = await A.br.get(`${pa()}/v1/inbox/conversations/${c2.id}`)
+  assert.equal(d.json.channel.window_open, false)
+  assert.equal(d.json.can_reply, false)
+  assert.equal(d.json.can_template, true)
+  const txt = await A.br.post(`${pa()}/v1/inbox/conversations/${c2.id}/messages`, { type: 'text', text: 'hola' })
+  assert.equal(txt.status, 409)
+  assert.equal(txt.json.error.code, 'window_closed')
+  // plantillas aprobadas (la pendiente no aparece; la de imagen no es compatible todavía)
+  const tpls = await A.br.get(`${pa()}/v1/inbox/conversations/${c2.id}/templates`)
+  assert.equal(tpls.status, 200, tpls.text)
+  assert.deepEqual(tpls.json.items.map((t) => t.name).sort(), ['promo_img', 'seguimiento'])
+  assert.equal(tpls.json.items.find((t) => t.name === 'promo_img').supported, false)
+  assert.equal((await A.br.post(`${pa()}/v1/inbox/conversations/${c2.id}/template`, { name: 'seguimiento', language: 'es_MX', params: ['Laura'] })).status, 400, 'faltan variables')
+  const sendT = await A.br.post(`${pa()}/v1/inbox/conversations/${c2.id}/template`, { name: 'seguimiento', language: 'es_MX', params: ['Laura', 'A-77'] })
+  assert.equal(sendT.status, 200, sendT.text)
+  const tsent = await bspWait((s) => s.type === 'template' && s.to === '+5215533334444')
+  assert.equal(tsent.template.name, 'seguimiento')
+  assert.deepEqual(tsent.template.components[0].parameters.map((x) => x.text), ['Laura', 'A-77'])
+  const d3 = await A.br.get(`${pa()}/v1/inbox/conversations/${c2.id}`)
+  assert.ok(d3.json.messages.some((m) => m.content.includes('pedido A-77')))
+  await A.br.post(`${pa()}/v1/inbox/conversations/${c2.id}/close`)
+  await A.br.put(`${pa()}/v1/agents/${agent.id}`, { tools: { handoff: { enabled: false, mode: 'notify' } } })
+})
+
+test('whatsapp: 360dialog con webhook por número y desconexión', async () => {
+  const agent = A.agents[3]
+  const con = await A.br.post(`${pa()}/v1/whatsapp/${agent.id}`, { provider: '360dialog', api_key: BSP_KEYS.d360 })
+  assert.equal(con.status, 200, con.text)
+  const ch = con.json.channel
+  assert.equal(ch.phone, '525510000001')
+  const hook = BSP.hooks.find((h) => h.provider === '360dialog')
+  assert.ok(hook.url.endsWith(`/v1/wa/360dialog/${ch.id}`))
+  const token = hook.headers['X-Zentekia-Token']
+  assert.ok(token && token.length > 20)
+  // evento en formato de la Cloud API de Meta
+  const payload = {
+    object: 'whatsapp_business_account',
+    entry: [{ id: 'WABA', changes: [{ field: 'messages', value: { messaging_product: 'whatsapp', metadata: { display_phone_number: '525510000001', phone_number_id: 'PNID' }, contacts: [{ profile: { name: 'Pedro' }, wa_id: '5215599998888' }], messages: [{ from: '5215599998888', id: `wamid.D360IN.${run}`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: '¿Hacen envíos?' } }] } }] }],
+  }
+  const noTok = await fetch(`${BASE}/v1/wa/360dialog/${ch.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+  assert.equal(noTok.status, 401)
+  const ok = await fetch(`${BASE}/v1/wa/360dialog/${ch.id}`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Zentekia-Token': token }, body: JSON.stringify(payload) })
+  assert.equal(ok.status, 200)
+  const out = await bspWait((s) => s.provider === '360dialog' && s.to === '5215599998888')
+  assert.ok(out, `no contestó por 360dialog: ${JSON.stringify(BSP.sent.slice(-3))}`)
+  assert.equal(out.messaging_product, 'whatsapp')
+  assert.match(out.text.body, /Respuesta simulada/)
+  // desconectar: el canal desaparece y en YCloud se borra el webhook
+  assert.equal((await A.br.del(`${pa()}/v1/whatsapp/${agent.id}`)).status, 200)
+  assert.equal((await A.br.get(`${pa()}/v1/whatsapp/${agent.id}`)).json.channel, null)
+  assert.equal((await A.br.del(`${pa()}/v1/whatsapp/${WA.agent.id}`)).status, 200)
+  assert.ok(BSP.deleted.some((p) => p.endsWith('/we1')))
+  // un webhook a un canal desconectado ya no entra
+  assert.equal((await ycHook(WA.ch.id, ycInbound('5215511112222', 'hola'))).status, 404)
+  bspServer.close()
+})

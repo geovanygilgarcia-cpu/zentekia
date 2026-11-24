@@ -267,7 +267,7 @@ const DDL = [
   `CREATE INDEX IF NOT EXISTS ix_voice_pending ON voice_calls(status, created_at)`,
 ]
 
-const SCHEMA_VERSION = '9'
+const SCHEMA_VERSION = '10'
 
 let ready: Promise<void> | null = null
 
@@ -289,6 +289,7 @@ export function ensureSchema(db: D1Database): Promise<void> {
       await migrateV7(db)
       await migrateV8(db)
       await migrateV9(db)
+      await migrateV10(db)
       await seedModels(db)
       await db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES ('schema', ?)").bind(SCHEMA_VERSION).run()
     })().catch((e) => {
@@ -503,6 +504,57 @@ async function migrateV9(db: D1Database) {
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (tenant_id, user_id)
       )`,
+    ].map((s) => db.prepare(s)),
+  )
+}
+
+/**
+ * v10: WhatsApp (fase 2 omnicanal).
+ *  - channels: número de WhatsApp de un asistente vía BSP (360dialog o YCloud), con la API key y el secreto
+ *    del webhook cifrados por cliente. Un número solo puede estar conectado una vez en toda la plataforma.
+ *  - conversations: canal y vencimiento de la ventana de 24 h (wa_window_expires_at).
+ *  - messages: id del mensaje en WhatsApp (deduplicación de reintentos), estado de entrega y adjunto.
+ */
+async function migrateV10(db: D1Database) {
+  const ccols = await db.prepare('PRAGMA table_info(conversations)').all<{ name: string }>()
+  const ch = new Set(ccols.results.map((c) => c.name))
+  for (const [name, type] of [['channel_id', 'TEXT'], ['wa_window_expires_at', 'INTEGER']] as const) {
+    if (!ch.has(name)) await db.prepare(`ALTER TABLE conversations ADD COLUMN ${name} ${type}`).run()
+  }
+  const mcols = await db.prepare('PRAGMA table_info(messages)').all<{ name: string }>()
+  const mh = new Set(mcols.results.map((c) => c.name))
+  for (const [name, type] of [['channel_message_id', 'TEXT'], ['delivery_status', 'TEXT'], ['media_json', 'TEXT']] as const) {
+    if (!mh.has(name)) await db.prepare(`ALTER TABLE messages ADD COLUMN ${name} ${type}`).run()
+  }
+  await db.batch(
+    [
+      `CREATE TABLE IF NOT EXISTS channels (
+        id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'connected',
+        phone TEXT NOT NULL,
+        display_phone TEXT,
+        external_id TEXT,
+        waba_id TEXT,
+        verified_name TEXT,
+        quality_rating TEXT,
+        api_key_enc TEXT NOT NULL,
+        last4 TEXT NOT NULL,
+        webhook_secret_enc TEXT,
+        webhook_id TEXT,
+        last_error TEXT,
+        last_inbound_at INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )`,
+      'CREATE INDEX IF NOT EXISTS ix_channels_tenant ON channels(tenant_id, agent_id)',
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_channels_phone ON channels(type, phone)',
+      'CREATE INDEX IF NOT EXISTS ix_conv_contact ON conversations(tenant_id, channel_id, visitor_id, last_message_at DESC)',
+      // Los reintentos del BSP no duplican mensajes
+      'CREATE UNIQUE INDEX IF NOT EXISTS ux_msg_channel ON messages(tenant_id, channel_message_id) WHERE channel_message_id IS NOT NULL',
     ].map((s) => db.prepare(s)),
   )
 }

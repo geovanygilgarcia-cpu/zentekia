@@ -28,3 +28,6 @@ DEV_FAKE_AI = "true"
 ADMIN_EMAIL = "erik@zentekia.com"
 ADMIN_PASSWORD = "clave-de-prueba-123"
 MASTER_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+# WhatsApp: proveedores simulados que levanta la prueba en el puerto 8799
+WA_360_BASE = "http://127.0.0.1:8799/d360"
+WA_YCLOUD_BASE = "http://127.0.0.1:8799/yc"
