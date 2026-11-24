@@ -214,3 +214,7 @@
 #costos {
   scroll-margin-top: 80px;
 }
+
+/* productos del cliente (agentes virtuales / contact center) */
+.prod { border: 1px solid var(--line, rgba(255,255,255,.1)); border-radius: 12px; padding: 12px 14px; margin: 14px 0 4px; }
+.prod .check span { line-height: 1.45; }

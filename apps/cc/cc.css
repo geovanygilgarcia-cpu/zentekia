@@ -1,0 +1,22 @@
+/* ---------- Zentekia Contact Center ---------- */
+.cc-app .brand small { letter-spacing: 0.08em; white-space: nowrap; }
+.cc-presence { margin: 4px 2px 14px; }
+.cc-presence .ib-presence { width: 100%; justify-content: flex-start; }
+.cc-presence .ib-presence select { flex: 1; }
+.cc-top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.cc-title { margin: 0; font: 700 24px var(--display); color: var(--strong); letter-spacing: -0.01em; }
+/* La bandeja ocupa toda la pantalla: es donde el agente pasa el día */
+.cc-full .main { padding: 22px 24px 20px; }
+.cc-full .ib { height: calc(100vh - 110px); }
+.cc-channels { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 14px; }
+.cc-channel { display: flex; flex-direction: column; gap: 12px; color: var(--ink); text-decoration: none; transition: border-color 0.2s, transform 0.2s; }
+.cc-channel:hover { border-color: rgba(91, 140, 255, 0.4); transform: translateY(-1px); }
+.cc-channel-top { display: flex; flex-direction: column; gap: 2px; }
+.cc-channel-top b { font: 700 17px var(--display); color: var(--strong); }
+.cc-channel-chs { display: flex; flex-direction: column; gap: 6px; }
+.cc-pill { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; color: var(--faint); }
+.cc-pill.on { color: var(--ink); }
+@media (max-width: 820px) {
+  .cc-full .main { padding: 16px; }
+  .cc-full .ib { height: calc(100vh - 150px); }
+}

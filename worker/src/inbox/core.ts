@@ -20,15 +20,31 @@ import { analyzeConversation } from '../leads/analyze'
 import { ChannelRepo } from '../db/channel-repo'
 import { channelCreds, isWhatsApp, sendTemplateToContact, sendTextToContact, windowOpen, type WaConvRef } from '../channels/outbound'
 import { connectorFor } from '../channels/whatsapp'
+import { productsOf } from '../lib/products'
 
-export type EscalationReason = 'ai_tool' | 'keyword' | 'max_turns' | 'manual'
+export type EscalationReason = 'ai_tool' | 'keyword' | 'max_turns' | 'manual' | 'direct'
 
 const REASON_LABEL: Record<EscalationReason, string> = {
   ai_tool: 'el asistente pidió a una persona',
   keyword: 'el visitante pidió hablar con una persona',
   max_turns: 'se alcanzó el máximo de respuestas de la IA sin resolver',
   manual: 'escalada a mano',
+  direct: 'entrada directa al contact center (sin IA)',
 }
+
+/** ¿Este cliente tiene el contact center (bandeja de agentes humanos) y el Worker los Durable Objects? */
+export const contactCenterOn = (env: Env, tenant: Pick<TenantRow, 'products_json'>) => inboxReady(env) && productsOf(tenant).cc
+
+/**
+ * ¿Puede contestar la IA? No si el cliente no tiene agentes virtuales o si el canal es «solo personas».
+ * En ese caso la conversación entra directo a la cola (si hay contact center).
+ */
+export function aiAllowed(tenant: Pick<TenantRow, 'products_json'>, agent: Pick<AgentRow, 'config_json'>): boolean {
+  return productsOf(tenant).va && parseJson<AgentConfig>(agent.config_json, {}).mode !== 'human'
+}
+
+/** Texto de espera de un canal sin IA */
+export const HUMAN_CHANNEL_WAIT = 'Gracias por escribirnos. En un momento te atiende una persona del equipo.'
 
 export const DEFAULT_KEYWORDS = ['hablar con una persona', 'hablar con un humano', 'hablar con alguien', 'agente humano', 'persona real', 'con un asesor', 'con un ejecutivo']
 
@@ -57,14 +73,17 @@ export interface InboxSettings {
 }
 
 export function inboxSettings(agent: Pick<AgentRow, 'config_json'>): InboxSettings {
-  const h: HandoffConfig = parseJson<AgentConfig>(agent.config_json, {}).tools?.handoff ?? {}
-  const policy = h.no_agents === 'ai' ? 'ai' : 'wait'
+  const cfg = parseJson<AgentConfig>(agent.config_json, {})
+  const h: HandoffConfig = cfg.tools?.handoff ?? {}
+  // Canal sin IA: siempre a la bandeja y, si no hay nadie, se queda en la cola (no hay IA que siga)
+  const human = cfg.mode === 'human'
+  const policy = !human && h.no_agents === 'ai' ? 'ai' : 'wait'
   return {
-    enabled: Boolean(h.enabled) && h.mode === 'inbox',
+    enabled: human || (Boolean(h.enabled) && h.mode === 'inbox'),
     keywords: (h.keywords?.length ? h.keywords : DEFAULT_KEYWORDS).map(norm).filter(Boolean),
     max_ai_turns: Math.max(0, Math.min(50, h.max_ai_turns ?? 0)),
     queue_id: h.queue_id || null,
-    waiting_message: h.waiting_message?.trim() || DEFAULT_TEXTS.waiting,
+    waiting_message: h.waiting_message?.trim() || (human ? HUMAN_CHANNEL_WAIT : DEFAULT_TEXTS.waiting),
     assigned_message: h.assigned_message?.trim() || DEFAULT_TEXTS.assigned,
     handback_message: h.handback_message?.trim() || DEFAULT_TEXTS.handback,
     no_agents: policy,
@@ -166,7 +185,9 @@ export interface EscalateResult {
 export async function escalate(env: Env, ctx: ExecutionContext, tenant: TenantRow, agent: AgentRow, convId: string, reason: EscalationReason, opts: { portalBase?: string; note?: string } = {}): Promise<EscalateResult> {
   const s = inboxSettings(agent)
   const inbox = new InboxRepo(env.DB, tenant.id)
-  if (!s.enabled || !inboxReady(env)) return { escalated: false, status: ((await inbox.conversation(convId))?.status ?? 'ai_active') as ConvStatus }
+  // Entrada directa (canal sin IA o cliente sin agentes virtuales): va a la cola aunque la herramienta esté apagada
+  if (reason === 'direct') s.enabled = true
+  if (!s.enabled || !contactCenterOn(env, tenant)) return { escalated: false, status: ((await inbox.conversation(convId))?.status ?? 'ai_active') as ConvStatus }
   if (!(await inbox.escalate(convId, { reason, note: opts.note ?? null, queueId: s.queue_id }))) {
     return { escalated: false, status: ((await inbox.conversation(convId))?.status ?? 'ai_active') as ConvStatus }
   }
@@ -179,7 +200,7 @@ export async function escalate(env: Env, ctx: ExecutionContext, tenant: TenantRo
 
   const d = await dispatchVia(env, tenant.id, convId)
   if (d?.assigned) return { escalated: true, status: 'human_active' }
-  if (!d?.online && s.no_agents === 'ai') {
+  if (!d?.online && s.no_agents === 'ai' && aiAllowed(tenant, agent)) {
     // Nadie conectado y la política dice que siga la IA
     await handbackToAi(env, tenant.id, convId, s.no_agents_message, 'Nadie disponible en la bandeja: la IA continúa.')
     return { escalated: true, status: 'ai_active' }
@@ -408,9 +429,11 @@ export async function onWaitTimeout(env: Env, tenantId: string, convId: string) 
   const inbox = new InboxRepo(env.DB, tenantId)
   const conv = await inbox.conversation(convId)
   if (!conv || conv.status !== 'waiting_human') return
-  const agent = await new TenantRepo(env.DB, tenantId).agent(conv.agent_id)
+  const repo = new TenantRepo(env.DB, tenantId)
+  const agent = await repo.agent(conv.agent_id)
   const s = agent ? inboxSettings(agent) : null
-  if (s?.no_agents === 'ai') {
+  const tenant = await repo.tenant()
+  if (s?.no_agents === 'ai' && tenant && agent && aiAllowed(tenant, agent)) {
     await handbackToAi(env, tenantId, convId, s.no_agents_message, 'Se agotó el tiempo de espera: la IA continúa.').catch(() => {})
   } else {
     await event(inbox, convId, 'Se agotó el tiempo máximo de espera; el visitante sigue en la cola.')

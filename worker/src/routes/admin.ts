@@ -14,6 +14,7 @@ import { clientIp, fail, json, randomToken, readJson, sha256Hex } from '../lib/h
 import { portalHostLabel, portalUrl } from '../lib/hosts'
 import { createInvite, provisionTenant } from '../lib/provision'
 import { match, toCsv } from '../lib/router'
+import { DEFAULT_SEAT_PRICE_MICRO, isLicensedRole, productsOf, type Products } from '../lib/products'
 
 const usd = z.number().min(0).max(1_000_000)
 const toMicro = (n: number) => Math.round(n * 1_000_000)
@@ -24,6 +25,21 @@ const slugSchema = z
   .regex(/^[a-z][a-z0-9-]{1,30}[a-z0-9]$/, 'de 3 a 32 caracteres: minúsculas, números y guiones; empieza con letra')
   .refine((s) => !RESERVED_SLUGS.has(s), 'ese nombre está reservado')
   .refine((s) => !s.includes('--'), 'sin guiones dobles')
+
+/** Productos del cliente: agentes virtuales y contact center (licencias por agente humano) */
+const productsSchema = z.object({
+  va: z.boolean(),
+  cc: z.boolean(),
+  cc_seats: z.number().int().min(0).max(10_000).default(0),
+  // null = el precio general por licencia
+  cc_seat_price_usd: usd.nullable().optional(),
+})
+const toProducts = (p: z.infer<typeof productsSchema>): Products => ({
+  va: p.va,
+  cc: p.cc,
+  cc_seats: p.cc ? p.cc_seats : 0,
+  cc_seat_price_micro: p.cc_seat_price_usd == null ? null : toMicro(p.cc_seat_price_usd),
+})
 
 export async function adminRoutes(env: Env, request: Request, url: URL, sub: string): Promise<Response> {
   const ctx = await loadSession(env, request, 'admin', null)
@@ -44,6 +60,7 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
       base_domain: env.BASE_DOMAIN || null,
       totp_required: env.TOTP_OBLIGATORIO !== 'false',
       plans: Object.entries(PLANS).map(([id, v]) => ({ id, ...v })),
+      default_seat_price_micro: DEFAULT_SEAT_PRICE_MICRO,
     })
   }
 
@@ -65,8 +82,10 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
         limit_behavior: z.enum(['block', 'allow']).default('block'),
         enabled_models: z.array(z.string().max(60)).max(30),
         import_prakticall: z.boolean().default(false),
+        products: productsSchema.optional(),
       }),
     )
+    if (b.products && !b.products.va && !b.products.cc) fail(400, 'products', 'Activa al menos un producto: agentes virtuales o contact center.')
     if (await platform.tenantBySlug(b.slug)) fail(400, 'slug_taken', 'Ese slug ya está en uso.')
     const { tenant, invite } = await provisionTenant(env, url, {
       name: b.name,
@@ -77,6 +96,7 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
       limitBehavior: b.limit_behavior,
       enabledModels: b.enabled_models,
       importPrakticall: b.import_prakticall,
+      products: b.products ? toProducts(b.products) : undefined,
     })
     await audit('tenant.created', tenant.id, { slug: b.slug, plan: b.plan_id, limit_usd: b.monthly_limit_usd, owner: b.owner_email })
     return json({ id: tenant.id, invite_link: invite.link, emailed: invite.emailed, portal_url: portalUrl(env, url, b.slug) })
@@ -90,7 +110,9 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
       const [from, to] = periodRange(periodOf(Date.now()))
       const { data_key_enc: _dk, ...safe } = tenant
       return json({
-        tenant: { ...safe, enabled_models: parseJson<string[]>(tenant.enabled_models, []), portal: portalHostLabel(env, url, tenant.slug) },
+        tenant: { ...safe, enabled_models: parseJson<string[]>(tenant.enabled_models, []), portal: portalHostLabel(env, url, tenant.slug), products: productsOf(tenant) },
+        seats_used: (await repo.users()).filter((u) => isLicensedRole(u.role)).length,
+        default_seat_price_micro: DEFAULT_SEAT_PRICE_MICRO,
         users: await repo.users(),
         agents: (await repo.listAgents()).map((a) => ({ id: a.id, name: a.name, model_id: a.model_id })),
         spend: await repo.spendBetween(from, to),
@@ -118,8 +140,14 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
           // tokens incluidos por mensaje; null = el general
           msg_included_in: z.number().int().min(0).max(10_000_000).nullable().optional(),
           msg_included_out: z.number().int().min(0).max(10_000_000).nullable().optional(),
+          products: productsSchema.optional(),
         }),
       )
+      if (b.products && !b.products.va && !b.products.cc) fail(400, 'products', 'Activa al menos un producto: agentes virtuales o contact center.')
+      if (b.products) {
+        const used = (await new TenantRepo(env.DB, tenant.id).users()).filter((u) => isLicensedRole(u.role)).length
+        if (b.products.cc && b.products.cc_seats < used) fail(400, 'seats', `El cliente ya tiene ${used} agentes o supervisores; pon al menos ${used} licencias o quita accesos primero.`)
+      }
       const priceOf = (v: number | null | undefined) => (v === undefined ? undefined : v === null ? null : toMicro(v))
       await platform.updateTenant(tenant.id, {
         name: b.name,
@@ -133,6 +161,7 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
         price_minute_micro: priceOf(b.price_minute_usd),
         msg_included_in: b.msg_included_in,
         msg_included_out: b.msg_included_out,
+        products_json: b.products ? JSON.stringify(toProducts(b.products)) : undefined,
       })
       await audit('tenant.updated', tenant.id, b)
       return json({ ok: true })
@@ -164,7 +193,7 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
         target = (await repo.users()).find((u) => u.id === id)
       }
       if (!target) fail(400, 'no_owner', 'El cliente no tiene owner. Escribe un correo.')
-      const inv = await createInvite(env, url, tenant, target!.id, target!.email)
+      const inv = await createInvite(env, url, tenant, target!.id, target!.email, productsOf(tenant).va ? 'portal' : 'cc')
       await audit('tenant.invite_sent', tenant.id, { email: target!.email })
       return json({ invite_link: inv.link, emailed: inv.emailed })
     }
@@ -305,11 +334,21 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
     const b = await readJson(request, z.object({ period: z.string().regex(/^\d{4}-\d{2}$/) }))
     const [from, to] = periodRange(b.period)
     const rows = await platform.usageReport(from, to)
-    const tenants = [...new Set(rows.map((r) => r.tenant_id))]
+    // Clientes con contact center: se cobran sus licencias aunque no tengan consumo de IA
+    const ccTenants = (await platform.contactCenterTenants()).filter((t) => productsOf(t).cc)
+    const tenants = [...new Set([...rows.map((r) => r.tenant_id), ...ccTenants.map((t) => t.id)])]
     for (const tid of tenants) {
       const repo = new TenantRepo(env.DB, tid)
       const mine = rows.filter((r) => r.tenant_id === tid)
-      const lines = []
+      const lines: Array<Record<string, unknown>> = []
+      const cct = ccTenants.find((t) => t.id === tid)
+      let seatsMicro = 0
+      if (cct) {
+        const pr = productsOf(cct)
+        const price = pr.cc_seat_price_micro ?? DEFAULT_SEAT_PRICE_MICRO
+        seatsMicro = pr.cc_seats * price
+        lines.push({ model: 'Licencias de Contact Center', type: 'seats', seats: pr.cc_seats, unit_price_micro: price, tokens_in: 0, tokens_out: 0, in_per_1m_micro: 0, out_per_1m_micro: 0, cost_micro: seatsMicro })
+      }
       for (const r of mine) {
         const mo = await platform.model(r.model_id)
         const pr = mo ? await effectivePrice(platform, repo, mo, to - 1) : { in_per_1m: 0, out_per_1m: 0 }
@@ -333,7 +372,7 @@ export async function adminRoutes(env: Env, request: Request, url: URL, sub: str
         period: b.period,
         tokens_in: mine.reduce((a, r) => a + r.tokens_in, 0),
         tokens_out: mine.reduce((a, r) => a + r.tokens_out, 0),
-        total_micro: mine.reduce((a, r) => a + r.cost_micro, 0),
+        total_micro: mine.reduce((a, r) => a + r.cost_micro, 0) + seatsMicro,
         lines_json: JSON.stringify(lines),
       })
     }

@@ -506,6 +506,14 @@ test('bandeja: escala, la IA deja de responder, una sola persona toma y el visit
   const off = await chatOn(before.token, before.conv, 'quiero hablar con una persona')
   assert.match(off.text, /Respuesta simulada/)
 
+  // sin el producto Contact Center no hay bandeja ni agentes humanos
+  assert.equal((await A.br.put(`${pa()}/v1/agents/${agent.id}`, { tools: { handoff: { enabled: true, mode: 'inbox' } } })).status, 400)
+  assert.equal((await A.br.post(`${pa()}/v1/team/invite`, { email: `x@${A.slug}.com`, role: 'agent' })).json.error.code, 'no_product')
+  assert.equal((await A.br.get(`${pa()}/v1/inbox/bootstrap`)).status, 403)
+  // Zentekia le activa el Contact Center con 3 licencias (y a B con 1)
+  assert.equal((await admin.put(`/admin/v1/tenants/${A.id}`, { products: { va: true, cc: true, cc_seats: 3 } })).status, 200)
+  assert.equal((await admin.put(`/admin/v1/tenants/${B.id}`, { products: { va: true, cc: true, cc_seats: 1 } })).status, 200)
+
   // el owner activa la bandeja en «Pasar a una persona» (sin agentes: se queda en la cola)
   const on = await A.br.put(`${pa()}/v1/agents/${agent.id}`, { tools: { handoff: { enabled: true, mode: 'inbox', no_agents: 'wait', max_wait_min: 0 } } })
   assert.equal(on.status, 200, on.text)
@@ -516,8 +524,18 @@ test('bandeja: escala, la IA deja de responder, una sola persona toma y el visit
   for (const [k, role] of [['ag1', 'agent'], ['ag2', 'agent'], ['sup', 'supervisor']]) {
     const inv = await A.br.post(`${pa()}/v1/team/invite`, { email: `${k}@${A.slug}.com`, role })
     assert.equal(inv.status, 200, inv.text)
+    // la invitación de agentes y supervisores abre el Contact Center
+    assert.match(inv.json.link, /\/cc\/#\/invitacion\//)
     await acceptInvite(IB[k], pa(), inv.json.link, `Clave${k}12345`)
   }
+  // las 3 licencias están ocupadas: no se puede invitar a otro agente ni convertir a alguien en supervisor
+  const full = await A.br.post(`${pa()}/v1/team/invite`, { email: `ag4@${A.slug}.com`, role: 'agent' })
+  assert.equal(full.status, 400)
+  assert.equal(full.json.error.code, 'no_seats')
+  const team = await A.br.get(`${pa()}/v1/team`)
+  assert.deepEqual(team.json.seats, { enabled: true, total: 3, used: 3 })
+  // Zentekia no puede bajar las licencias por debajo de las que ya se usan
+  assert.equal((await admin.put(`/admin/v1/tenants/${A.id}`, { products: { va: true, cc: true, cc_seats: 2 } })).status, 400)
   // un agente no entra a la configuración de asistentes ni al equipo
   assert.equal((await IB.ag1.get(`${pa()}/v1/agents/${agent.id}`)).status, 403)
   assert.equal((await IB.ag1.get(`${pa()}/v1/team`)).status, 403)
@@ -925,4 +943,85 @@ test('whatsapp: 360dialog con webhook por número y desconexión', async () => {
   // un webhook a un canal desconectado ya no entra
   assert.equal((await ycHook(WA.ch.id, ycInbound('5215511112222', 'hola'))).status, 404)
   bspServer.close()
+})
+
+/* ---------- Contact Center como producto aparte (sin agentes virtuales) ---------- */
+
+test('contact center: cliente solo con agentes humanos, canal sin IA, licencias y cobro', async () => {
+  const C = { br: new Browser(), slug: `solo-cc-${run}` }
+  const pc = `/p/${C.slug}`
+  // Zentekia da de alta un cliente solo con Contact Center y 1 licencia a $30
+  assert.equal((await admin.post('/admin/v1/tenants', { name: 'Solo CC', slug: C.slug, owner_email: `owner@${C.slug}.com`, monthly_limit_usd: 10, enabled_models: [], products: { va: false, cc: false } })).status, 400, 'sin productos no se crea')
+  const t = await admin.post('/admin/v1/tenants', { name: 'Solo CC', slug: C.slug, owner_email: `owner@${C.slug}.com`, monthly_limit_usd: 10, enabled_models: [], products: { va: false, cc: true, cc_seats: 1, cc_seat_price_usd: 30 } })
+  assert.equal(t.status, 200, t.text)
+  assert.match(t.json.invite_link, /\/cc\/#\/invitacion\//, 'el owner entra directo al Contact Center')
+  await acceptInvite(C.br, pc, t.json.invite_link, 'ClaveSoloCC123')
+  // el portal de agentes virtuales lleva al Contact Center; el Contact Center abre
+  const root = await C.br.get(`${pc}/`)
+  assert.equal(root.status, 302)
+  assert.match(root.headers.get('location'), /\/cc\/$/)
+  const app = await C.br.get(`${pc}/cc/`)
+  assert.equal(app.status, 200)
+  assert.match(app.text, /assets\/cc\.js/)
+  // no puede crear asistentes de IA
+  assert.equal((await C.br.post(`${pc}/v1/agents`, { name: 'IA' })).status, 403)
+  // nace con un canal de chat web sin IA
+  const chs = await C.br.get(`${pc}/v1/cc/channels`)
+  assert.equal(chs.status, 200, chs.text)
+  assert.equal(chs.json.items.length, 1)
+  const ch = chs.json.items[0]
+  assert.ok(ch.widget_key)
+  const ov = await C.br.get(`${pc}/v1/overview`)
+  assert.equal(ov.json.agents.find((a) => a.id === ch.id).mode, 'human')
+  assert.deepEqual([ov.json.products.va, ov.json.products.cc], [false, true])
+  await C.br.put(`${pc}/v1/security`, { allowed_origins: [`https://${C.slug}.example`] })
+  // puede crear más canales
+  const nuevo = await C.br.post(`${pc}/v1/cc/channels`, { name: 'Ventas' })
+  assert.equal(nuevo.status, 200, nuevo.text)
+
+  // el visitante escribe: la IA nunca contesta, entra directo a la cola
+  const v = await visitorChat(ch.widget_key, `https://${C.slug}.example`, 'Hola, ¿tienen envíos?')
+  assert.equal(v.text, '', `la IA contestó en un canal sin IA: ${v.text}`)
+  assert.equal(v.done.status, 'waiting_human')
+  const usage = await admin.get(`/admin/v1/usage`)
+  assert.ok(!usage.json.rows.some((r) => r.slug === C.slug), `se cobró IA a un cliente sin agentes virtuales: ${JSON.stringify(usage.json.rows.filter((r) => r.slug === C.slug))}`)
+
+  // 1 licencia: un agente sí, el segundo no
+  const ag = new Browser()
+  const inv = await C.br.post(`${pc}/v1/team/invite`, { email: `ana@${C.slug}.com`, role: 'agent' })
+  assert.equal(inv.status, 200, inv.text)
+  assert.equal((await C.br.post(`${pc}/v1/team/invite`, { email: `beto@${C.slug}.com`, role: 'agent' })).json.error.code, 'no_seats')
+  await acceptInvite(ag, pc, inv.json.link, 'ClaveAnaCC123')
+  // al ponerse en línea se le asigna la conversación que esperaba
+  assert.equal((await ag.put(`${pc}/v1/inbox/presence`, { status: 'online' })).status, 200)
+  let mine = []
+  for (let i = 0; i < 30 && !mine.length; i++) {
+    await new Promise((r) => setTimeout(r, 150))
+    mine = (await ag.get(`${pc}/v1/inbox/conversations?view=mine`)).json.items
+  }
+  assert.equal(mine.length, 1, 'no se asignó la conversación al conectarse')
+  assert.equal(mine[0].escalation_reason, 'direct')
+  assert.equal((await ag.post(`${pc}/v1/inbox/conversations/${v.conv}/messages`, { type: 'text', text: 'Sí, enviamos a todo México.' })).status, 200)
+  const h = await history(v.token, v.conv)
+  assert.ok(h.messages.some((m) => m.sender === 'human' && /todo México/.test(m.content)))
+  // aunque la persona devuelva la conversación, en un canal sin IA nadie automático contesta
+  await ag.post(`${pc}/v1/inbox/conversations/${v.conv}/handback`)
+  const again = await chatOn(v.token, v.conv, 'gracias')
+  assert.equal(again.text, '')
+  assert.notEqual(again.done.status, 'ai_active')
+  await ag.put(`${pc}/v1/inbox/presence`, { status: 'offline' })
+
+  // un cliente sin Contact Center no tiene bandeja
+  assert.equal((await admin.put(`/admin/v1/tenants/${B.id}`, { products: { va: true, cc: false } })).status, 200)
+  assert.equal((await B.br.get(`${pb()}/v1/inbox/bootstrap`)).status, 403)
+  assert.equal((await B.br.get(`${pb()}/cc/`)).status, 403)
+
+  // el estado de cuenta del mes cobra las licencias: 1 × $30
+  const period = new Date().toISOString().slice(0, 7)
+  assert.equal((await admin.post('/admin/v1/statements/close', { period })).status, 200)
+  const st = (await admin.get(`/admin/v1/usage?period=${period}`)).json.statements.find((s) => s.slug === C.slug)
+  assert.ok(st, 'no se generó estado de cuenta para el cliente solo con Contact Center')
+  const seats = JSON.parse(st.lines_json).find((l) => l.type === 'seats')
+  assert.equal(seats.seats, 1)
+  assert.equal(st.total_micro, 30_000_000)
 })

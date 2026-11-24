@@ -36,15 +36,20 @@ export class PlatformRepo {
     ).all()
     return r.results
   }
-  async insertTenant(t: Pick<TenantRow, 'id' | 'slug' | 'name' | 'plan_id' | 'monthly_limit_micro' | 'limit_behavior' | 'enabled_models' | 'data_key_enc' | 'currency'>) {
+  async insertTenant(t: Pick<TenantRow, 'id' | 'slug' | 'name' | 'plan_id' | 'monthly_limit_micro' | 'limit_behavior' | 'enabled_models' | 'data_key_enc' | 'currency'> & { products_json?: string | null }) {
     await this.q(
-      `INSERT INTO tenants (id, slug, name, status, plan_id, monthly_limit_micro, currency, limit_behavior, enabled_models, data_key_enc, created_at)
-       VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
-      t.id, t.slug, t.name, t.plan_id, t.monthly_limit_micro, t.currency, t.limit_behavior, t.enabled_models, t.data_key_enc, Date.now(),
+      `INSERT INTO tenants (id, slug, name, status, plan_id, monthly_limit_micro, currency, limit_behavior, enabled_models, data_key_enc, created_at, products_json)
+       VALUES (?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`,
+      t.id, t.slug, t.name, t.plan_id, t.monthly_limit_micro, t.currency, t.limit_behavior, t.enabled_models, t.data_key_enc, Date.now(), t.products_json ?? null,
     ).run()
   }
-  async updateTenant(tid: string, f: Partial<Pick<TenantRow, 'name' | 'status' | 'plan_id' | 'monthly_limit_micro' | 'limit_behavior' | 'enabled_models' | 'suspended_message' | 'turnstile' | 'currency' | 'price_message_micro' | 'price_minute_micro' | 'msg_included_in' | 'msg_included_out'>>) {
-    const allowed = ['name', 'status', 'plan_id', 'monthly_limit_micro', 'limit_behavior', 'enabled_models', 'suspended_message', 'turnstile', 'currency', 'price_message_micro', 'price_minute_micro', 'msg_included_in', 'msg_included_out'] as const
+  /** Clientes con contact center (para cobrar licencias aunque no tengan consumo de IA) */
+  async contactCenterTenants() {
+    const r = await this.q("SELECT * FROM tenants WHERE products_json LIKE '%\"cc\":true%'").all<TenantRow>()
+    return r.results
+  }
+  async updateTenant(tid: string, f: Partial<Pick<TenantRow, 'name' | 'status' | 'plan_id' | 'monthly_limit_micro' | 'limit_behavior' | 'enabled_models' | 'suspended_message' | 'turnstile' | 'currency' | 'price_message_micro' | 'price_minute_micro' | 'msg_included_in' | 'msg_included_out' | 'products_json'>>) {
+    const allowed = ['name', 'status', 'plan_id', 'monthly_limit_micro', 'limit_behavior', 'enabled_models', 'suspended_message', 'turnstile', 'currency', 'price_message_micro', 'price_minute_micro', 'msg_included_in', 'msg_included_out', 'products_json'] as const
     const sets: string[] = []
     const vals: unknown[] = []
     for (const k of allowed) {

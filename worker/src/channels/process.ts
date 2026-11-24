@@ -18,7 +18,7 @@ import { generateReply } from '../models/reply'
 import { analyzeConversation } from '../leads/analyze'
 import { onHandoff } from '../tools'
 import { mergedTheme, withinHours } from '../widget-theme'
-import { aiTurnsSinceEscalation, asksForHuman, closedElsewhere, escalate, inboxEvent, inboxReady, inboxSettings, type EscalationReason } from '../inbox/core'
+import { aiAllowed, aiTurnsSinceEscalation, asksForHuman, closedElsewhere, contactCenterOn, escalate, inboxEvent, inboxSettings, type EscalationReason } from '../inbox/core'
 import { json } from '../lib/http'
 import { channelCreds, sendTextToContact, webhookSecret } from './outbound'
 import { connectorFor, digits, type WaInbound } from './whatsapp'
@@ -129,7 +129,12 @@ export async function processInbound(env: Env, ctx: ExecutionContext, tenantId: 
 
   const s = inboxSettings(agent)
   const portalBase = undefined
-  if (s.enabled && inboxReady(env)) {
+  // Sin IA (número del contact center o cliente sin agentes virtuales): directo a la cola de personas
+  if (!aiAllowed(tenant, agent)) {
+    if (contactCenterOn(env, tenant)) await escalate(env, ctx, tenant, agent, conv.id, 'direct', { portalBase })
+    return
+  }
+  if (s.enabled && contactCenterOn(env, tenant)) {
     let reason: EscalationReason | null = null
     if (asksForHuman(ev.text, s)) reason = 'keyword'
     else if (!fresh && s.max_ai_turns > 0 && (await aiTurnsSinceEscalation(env.DB, tenantId, conv)) >= s.max_ai_turns) reason = 'max_turns'
@@ -163,7 +168,7 @@ export async function processInbound(env: Env, ctx: ExecutionContext, tenantId: 
     return
   }
   if (r.handoff) {
-    if (s.enabled && inboxReady(env)) await escalate(env, ctx, tenant, agent, conv.id, 'ai_tool', { portalBase })
+    if (s.enabled && contactCenterOn(env, tenant)) await escalate(env, ctx, tenant, agent, conv.id, 'ai_tool', { portalBase })
     ctx.waitUntil(onHandoff(env, tenant, repo, agent, conv.id, '').catch((e) => console.error('handoff', e)))
   }
 }

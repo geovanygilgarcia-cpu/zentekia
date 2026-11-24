@@ -6,6 +6,7 @@
   - Se dispara al cerrar una conversación (chat o llamada), por el cron con las que quedaron inactivas,
     o a mano desde el portal ("Volver a analizar").
 */
+import { productsOf } from '../lib/products'
 import type { Env } from '../env'
 import { TenantRepo, type Analysis } from '../db/tenant-repo'
 import { PlatformRepo } from '../db/platform-repo'
@@ -180,7 +181,9 @@ export async function analyzeConversation(env: Env, tenant: TenantRow, repo: Ten
   const cfg = parseJson<AgentConfig>(agent?.config_json, {})
 
   let analysis: Analysis
-  if (!agent || !(await budgetAllows(repo, tenant))) {
+  // Sin agentes virtuales (solo Contact Center) o canal sin IA: análisis básico, nunca se cobra modelo
+  const noAi = !productsOf(tenant).va || cfg.mode === 'human'
+  if (!agent || noAi || !(await budgetAllows(repo, tenant))) {
     analysis = heuristic(userText)
   } else {
     let raw = ''

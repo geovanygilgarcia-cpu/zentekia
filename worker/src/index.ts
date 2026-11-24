@@ -21,6 +21,8 @@ import { sweepAnalysis } from './leads/analyze'
 import { inboxRoutes } from './routes/inbox'
 import { whatsappRoutes } from './routes/whatsapp'
 import { handleWaWebhook } from './channels/process'
+import { ccRoutes } from './routes/cc'
+import { productsOf } from './lib/products'
 import { asset } from './assets'
 import { FAVICON_B64 } from './favicon'
 
@@ -109,8 +111,17 @@ async function route(request: Request, env: Env, ctx: ExecutionContext, url: URL
     if (rest.startsWith('/v1/auth/')) return authRoutes(env, request, 'portal', tenant, rest.slice('/v1/auth/'.length))
     if (rest.startsWith('/v1/inbox/')) return inboxRoutes(env, request, url, tenant, rest.slice('/v1/inbox/'.length), ctx)
     if (rest.startsWith('/v1/whatsapp/')) return whatsappRoutes(env, request, url, tenant, rest.slice('/v1/whatsapp/'.length))
+    if (rest.startsWith('/v1/cc/')) return ccRoutes(env, request, url, tenant, rest.slice('/v1/cc/'.length))
     if (rest.startsWith('/v1/')) return portalRoutes(env, request, url, tenant, rest.slice('/v1/'.length))
-    if (request.method === 'GET') return spaPage(env, url, 'portal', { base: `${base}/v1`, slug, tenant: tenant.name })
+    // Contact Center (agentes humanos): otra aplicación, mismo inicio de sesión y misma API
+    if (request.method === 'GET' && rest === '/cc') return Response.redirect(`${url.origin}${base}/cc/`, 302)
+    if (request.method === 'GET' && rest.startsWith('/cc/')) {
+      if (!productsOf(tenant).cc) return productMissingPage(tenant.name, 'Contact Center')
+      return spaPage(env, url, 'cc', { base: `${base}/v1`, slug, tenant: tenant.name, portal: `${base}/` , va: productsOf(tenant).va ? '1' : '' })
+    }
+    // Cliente solo con Contact Center: el portal de agentes virtuales lleva directo a /cc/
+    if (request.method === 'GET' && (rest === '/' || rest === '') && !productsOf(tenant).va) return Response.redirect(`${url.origin}${base}/cc/`, 302)
+    if (request.method === 'GET') return spaPage(env, url, 'portal', { base: `${base}/v1`, slug, tenant: tenant.name, cc: productsOf(tenant).cc ? `${base}/cc/` : '' })
   }
 
   if (area.kind === 'combined' && path === '/') return Response.redirect(`${url.origin}/admin/`, 302)
@@ -123,12 +134,12 @@ function serveAsset(name: string): Response {
   return new Response(a.body, { headers: { 'Content-Type': a.type, 'Cache-Control': 'public, max-age=300', ...SECURITY_HEADERS } })
 }
 
-function spaPage(env: Env, url: URL, app: 'admin' | 'portal', data: Record<string, string>): Response {
+function spaPage(env: Env, url: URL, app: 'admin' | 'portal' | 'cc', data: Record<string, string>): Response {
   const chat = chatOrigin(env, url)
   const attrs = Object.entries({ ...data, chat })
     .map(([k, v]) => `data-${k}="${v.replace(/[&"<>]/g, (c) => `&#${c.charCodeAt(0)};`)}"`)
     .join(' ')
-  const title = app === 'admin' ? 'Zentekia Admin' : `Zentekia · ${data.tenant ?? ''}`
+  const title = app === 'admin' ? 'Zentekia Admin' : app === 'cc' ? `Contact Center · ${data.tenant ?? ''}` : `Zentekia · ${data.tenant ?? ''}`
   const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><title>${title.replace(/[<>&]/g, '')}</title>
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&family=JetBrains+Mono:wght@400;500&display=swap">
 <script src="/assets/theme.js"></script><link rel="icon" href="/favicon.ico" sizes="any"><link rel="stylesheet" href="/assets/${app}.css"></head><body><div id="root" ${attrs}></div><script src="/assets/${app}.js"></script></body></html>`
@@ -148,6 +159,16 @@ function spaPage(env: Env, url: URL, app: 'admin' | 'portal', data: Record<strin
     "form-action 'self'",
   ].join('; ')
   return new Response(html, { headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': csp, 'X-Frame-Options': 'DENY', ...SECURITY_HEADERS } })
+}
+
+/** El cliente no tiene contratado ese producto */
+function productMissingPage(tenantName: string, product: string): Response {
+  const name = tenantName.replace(/[<>&"]/g, '')
+  const html = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="robots" content="noindex, nofollow"><title>${product} · Zentekia</title><link rel="icon" href="/favicon.ico" sizes="any">
+<style>:root{color-scheme:dark;--bg:#07090d;--ink:#e8ebf2;--muted:#9aa3b5;--line:rgba(255,255,255,.1);--card:rgba(255,255,255,.04)}@media (prefers-color-scheme:light){:root{color-scheme:light;--bg:#f4f6fb;--ink:#0f172a;--muted:#5b6578;--line:rgba(15,23,42,.1);--card:#fff}}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px 16px;background:var(--bg);color:var(--ink);font:15px/1.55 system-ui,-apple-system,'Segoe UI',sans-serif}.c{width:min(440px,100%);text-align:center;background:var(--card);border:1px solid var(--line);border-radius:20px;padding:36px 28px}h1{margin:0 0 8px;font-size:22px}p{margin:0;color:var(--muted)}a{color:#5b8cff}</style></head>
+<body><main class="c"><h1>${product} no está activo</h1><p>La cuenta de <b>${name}</b> no tiene este producto. Pídelo a Zentekia.</p><p style="margin-top:14px"><a href="../">Volver</a></p></main></body></html>`
+  return new Response(html, { status: 403, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; frame-ancestors 'none'", 'X-Frame-Options': 'DENY', ...SECURITY_HEADERS } })
 }
 
 /** Página que ve un cliente suspendido en lugar de su portal */

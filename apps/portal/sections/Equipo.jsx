@@ -18,6 +18,9 @@ export default function Equipo({ api, readOnly }) {
   const [link, setLink] = useState(null)
   const [busy, run] = useAction()
   if (!data) return <Loading error={error} />
+  // Solo los roles de los productos contratados; agentes y supervisores ocupan licencia del Contact Center
+  const options = ROLE_OPTIONS.filter(([v]) => data.products?.cc || (v !== 'agent' && v !== 'supervisor'))
+  const seats = data.seats
   const invite = async (e) => {
     e.preventDefault()
     const r = await run(() => api.post('team/invite', { email, role }))
@@ -29,7 +32,14 @@ export default function Equipo({ api, readOnly }) {
   }
   return (
     <>
-      <PageHead title="Equipo" sub="Invita a tu equipo. Los editores configuran el agente, el conocimiento y el widget; no ven API keys ni facturación. Supervisores y agentes atienden la Bandeja." />
+      <PageHead title="Equipo" sub="Invita a tu equipo. Los editores administran la configuración; no ven API keys ni facturación. Supervisores y agentes atienden el Contact Center y cada uno ocupa una licencia." />
+      {seats?.enabled && (
+        <div class={'cc-seats' + (seats.used >= seats.total ? ' full' : '')}>
+          <span>Licencias de agente humano</span>
+          <b>{seats.used} de {seats.total}</b>
+          <span class="small muted">{seats.used >= seats.total ? 'Ya usas todas: para sumar a alguien, pide más licencias a Zentekia o quita el acceso a otra persona.' : `Te quedan ${seats.total - seats.used}.`}</span>
+        </div>
+      )}
       <div class="cols">
         <div class="col-main">
           <div class="card">
@@ -43,7 +53,7 @@ export default function Equipo({ api, readOnly }) {
                       <td>
                         {u.id === data.me || readOnly ? ROLE[u.role] : (
                           <select class="in" style="margin-top:0;padding:6px 8px;width:auto" value={u.role} onChange={(e) => run(() => api.put(`team/${u.id}`, { role: e.target.value }), 'Rol actualizado').then(reload)} aria-label={`Rol de ${u.email}`}>
-                            {ROLE_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                            {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                           </select>
                         )}
                       </td>
@@ -71,7 +81,7 @@ export default function Equipo({ api, readOnly }) {
               <Field label="Correo"><input type="email" value={email} onInput={(e) => setEmail(e.target.value)} required /></Field>
               <Field label="Rol">
                 <select value={role} onChange={(e) => setRole(e.target.value)}>
-                  {ROLE_OPTIONS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  {options.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                 </select>
               </Field>
               <p class="small muted" style="margin:8px 0 0">Supervisores y agentes solo entran a la Bandeja: atienden las conversaciones que la IA pasa a tu equipo. El supervisor ve todas y reasigna.</p>
