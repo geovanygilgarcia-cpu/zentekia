@@ -30,6 +30,7 @@ import { contrastProblems, DEFAULT_THEME, mergedTheme } from '../widget-theme'
 import { checkWebhookUrl, newWebhookSecret, sendWebhook } from '../tools/webhook'
 import type { ToolsConfig } from '../db/types'
 import { InboxRepo } from '../db/inbox-repo'
+import { ChannelRepo } from '../db/channel-repo'
 import { inboxReady, onAgentGone } from '../inbox/core'
 
 const hex = z.string().regex(/^#[0-9A-Fa-f]{6}$/, 'color en formato #RRGGBB')
@@ -200,6 +201,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
     anyRole()
     const agents = await repo.listAgents()
     const widgets = await repo.widgets()
+    const waChannels = await new ChannelRepo(env.DB, tenant.id).list()
     const alerts = role() === 'owner' ? await repo.alerts(10) : []
     const stats = await repo.conversationStats(Date.now() - 30 * 86_400_000)
     return json({
@@ -219,7 +221,7 @@ export async function portalRoutes(env: Env, request: Request, url: URL, tenant:
           color: theme?.primary ?? null,
           logo_url: w && (w.logo_data || theme?.logo_version) ? `${chatOrigin(env, url)}/v1/widget/logo?key=${w.widget_key}&v=${theme?.logo_version ?? w.version}` : null,
           // Canales del asistente: hoy solo chat; voz y WhatsApp se activan después
-          channels: { chat: w && chatEnabled(a) ? 'active' : 'off', voice: voiceAvailable(env) ? (voiceCfg(a).enabled && voiceCfg(a).el_agent_id ? 'active' : 'available') : 'soon', whatsapp: 'soon' },
+          channels: { chat: w && chatEnabled(a) ? 'active' : 'off', voice: voiceAvailable(env) ? (voiceCfg(a).enabled && voiceCfg(a).el_agent_id ? 'active' : 'available') : 'soon', whatsapp: (() => { const wc = waChannels.find((x) => x.agent_id === a.id); return wc ? (wc.status === 'connected' ? 'active' : 'error') : 'available' })() },
         }
       }),
       alerts,

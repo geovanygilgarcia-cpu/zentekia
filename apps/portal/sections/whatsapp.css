@@ -1,0 +1,26 @@
+/* ---------- Canal de WhatsApp (fase 2 omnicanal) ---------- */
+.wa-head { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.wa-ic { width: 44px; height: 44px; flex: none; border-radius: 12px; display: grid; place-items: center; color: #fff; background: linear-gradient(135deg, #25d366, #128c7e); }
+.wa-phone { font: 700 19px var(--display); color: var(--strong); letter-spacing: -0.01em; }
+.wa-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 8px; font-size: 13.5px; color: var(--ink-2); line-height: 1.5; }
+.wa-prov { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 4px 0 6px; }
+.wa-prov-opt, .wa-num { display: flex; flex-direction: column; gap: 4px; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 12px; background: var(--surface); cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+.wa-prov-opt input, .wa-num input { position: absolute; opacity: 0; pointer-events: none; }
+.wa-prov-opt.on, .wa-num.on { border-color: var(--accent-bright); background: var(--accent-soft); }
+.wa-prov-opt:focus-within, .wa-num:focus-within { box-shadow: 0 0 0 3px var(--accent-soft); }
+.wa-nums { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.wa-num { flex-direction: row; align-items: center; }
+/* bandeja: canal, ventana de 24 h, plantillas y entrega */
+.ib-ch { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 6px; flex: none; }
+.ib-ch-wa { background: rgba(37, 211, 102, 0.15); color: #25d366; }
+.ib-ch-web { background: var(--accent-soft); color: var(--accent-ink); }
+.ib-window { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12.5px; padding: 8px 14px; border-bottom: 1px solid var(--line); color: var(--ink-2); background: rgba(37, 211, 102, 0.06); }
+.ib-window.closed { background: var(--warn-soft); color: var(--warn-ink); }
+.ib-tick { font: 600 11px var(--mono); margin-left: 6px; }
+.ib-tick.read { color: #53bdeb; }
+.ib-tick.failed { color: var(--danger, #ef4444); }
+.ib-tpl { display: flex; flex-direction: column; gap: 8px; }
+.ib-tpl select, .ib-tpl input { width: 100%; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--line-2); background: var(--surface); color: var(--ink); font: 13.5px var(--font); }
+.ib-tpl-preview { font-size: 13px; white-space: pre-wrap; padding: 10px 12px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); }
+.ib-media { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; font-size: 12.5px; }
+@media (max-width: 700px) { .wa-prov { grid-template-columns: 1fr; } }

@@ -17,6 +17,9 @@ import { InboxRepo, type ConvStatus, type InboxConversation } from '../db/inbox-
 import { TenantRepo } from '../db/tenant-repo'
 import { parseJson, type AgentConfig, type AgentRow, type HandoffConfig, type TenantRow } from '../db/types'
 import { analyzeConversation } from '../leads/analyze'
+import { ChannelRepo } from '../db/channel-repo'
+import { channelCreds, isWhatsApp, sendTemplateToContact, sendTextToContact, windowOpen, type WaConvRef } from '../channels/outbound'
+import { connectorFor } from '../channels/whatsapp'
 
 export type EscalationReason = 'ai_tool' | 'keyword' | 'max_turns' | 'manual'
 
@@ -123,11 +126,13 @@ export interface VisitorMessage {
   created_at: number
 }
 
-/** Mensaje de sistema que ve el visitante (y la bandeja) */
+/** Mensaje de sistema que ve el visitante (y la bandeja). En WhatsApp se manda si la ventana está abierta. */
 async function notice(env: Env, inbox: InboxRepo, convId: string, content: string) {
   const m = await inbox.insert({ conversation_id: convId, role: 'system', sender: 'system', author_id: null, kind: 'notice', content })
   const msg: VisitorMessage = { id: m.id, role: 'system', content, sender: 'system', author: null, kind: 'notice', created_at: m.created_at }
   await visitorEvent(env, inbox.tenantId, convId, { type: 'message', message: msg })
+  const conv = (await inbox.conversation(convId)) as (InboxConversation & WaConvRef) | null
+  if (conv && isWhatsApp(conv) && windowOpen(conv)) await sendTextToContact(env, inbox.tenantId, conv, m.id, content).catch(() => {})
 }
 
 /** Evento interno del timeline (solo lo ven los agentes) */
@@ -302,9 +307,15 @@ export async function handbackByUser(env: Env, tenantId: string, conv: InboxConv
 /** Cerrar desde la bandeja */
 export async function closeByUser(env: Env, ctx: ExecutionContext, tenant: TenantRow, convId: string, byUserId: string, portalBase?: string) {
   const inbox = new InboxRepo(env.DB, tenant.id)
+  const before = (await inbox.conversation(convId)) as (InboxConversation & WaConvRef) | null
   if (!(await inbox.close(convId, 'human'))) throw new InboxError(409, 'state', 'La conversación ya estaba cerrada.')
   const { label } = await userLabel(inbox, byUserId)
   await event(inbox, convId, `${label} cerró la conversación.`, byUserId)
+  // En WhatsApp no hay pantalla de «conversación cerrada»: se le avisa con un mensaje
+  if (before && isWhatsApp(before) && windowOpen(before)) {
+    const m = await inbox.insert({ conversation_id: convId, role: 'system', sender: 'system', author_id: null, kind: 'notice', content: DEFAULT_TEXTS.closed })
+    await sendTextToContact(env, tenant.id, before, m.id, DEFAULT_TEXTS.closed).catch(() => {})
+  }
   await visitorEvent(env, tenant.id, convId, { type: 'ended' })
   await call(roomStub(env, tenant.id, convId), '/timeout', tenant.id, { cancel: true })
   await inboxEvent(env, tenant.id, 'conversation.closed', { conversation_id: convId })
@@ -328,12 +339,60 @@ export async function humanReply(env: Env, tenantId: string, convId: string, use
   const inbox = new InboxRepo(env.DB, tenantId)
   const conv = await inbox.conversation(convId)
   if (!conv || conv.status !== 'human_active' || conv.assignee_user_id !== user.id) throw new InboxError(409, 'not_yours', 'Toma la conversación antes de responder.')
+  const wa = conv as InboxConversation & WaConvRef
+  if (isWhatsApp(wa) && !windowOpen(wa)) throw new InboxError(409, 'window_closed', 'Pasaron más de 24 horas desde el último mensaje del cliente: WhatsApp solo permite enviar una plantilla aprobada.')
   const m = await inbox.insert({ conversation_id: convId, role: 'assistant', sender: 'human', author_id: user.id, kind: 'text', content: text })
+  if (isWhatsApp(wa)) {
+    try {
+      await sendTextToContact(env, tenantId, wa, m.id, text)
+    } catch (e) {
+      await inboxEvent(env, tenantId, 'message.created', { conversation_id: convId, message_id: m.id })
+      throw new InboxError(502, 'send_failed', e instanceof Error ? `${e.message} El mensaje quedó marcado como no enviado.` : 'No se pudo enviar por WhatsApp.')
+    }
+  }
   await inbox.markFirstHumanResponse(convId)
   const msg: VisitorMessage = { id: m.id, role: 'assistant', content: text, sender: 'human', author: publicName(user), kind: 'text', created_at: m.created_at }
   await visitorEvent(env, tenantId, convId, { type: 'message', message: msg })
   await inboxEvent(env, tenantId, 'message.created', { conversation_id: convId, message_id: m.id })
   return m
+}
+
+/**
+ * Plantilla aprobada de WhatsApp (la única forma de escribir fuera de la ventana de 24 h).
+ * La manda quien atiende la conversación; queda en el timeline con el texto ya armado.
+ */
+export async function sendWaTemplate(env: Env, tenantId: string, convId: string, user: { id: string; name: string | null }, t: { name: string; language: string; params: string[] }) {
+  const inbox = new InboxRepo(env.DB, tenantId)
+  const conv = (await inbox.conversation(convId)) as (InboxConversation & WaConvRef) | null
+  if (!conv || !isWhatsApp(conv)) throw new InboxError(400, 'not_whatsapp', 'Las plantillas solo aplican a conversaciones de WhatsApp.')
+  if (conv.status !== 'human_active' || conv.assignee_user_id !== user.id) throw new InboxError(409, 'not_yours', 'Toma la conversación antes de enviar una plantilla.')
+  const ch = await new ChannelRepo(env.DB, tenantId).get(conv.channel_id!)
+  if (!ch) throw new InboxError(409, 'channel', 'El número de WhatsApp de esta conversación ya no está conectado.')
+  const list = await connectorFor(ch.provider)!.templates(env, await channelCreds(env, ch))
+  const tpl = list.find((x) => x.name === t.name && x.language === t.language)
+  if (!tpl) throw new InboxError(400, 'template', 'Esa plantilla no está aprobada para este número.')
+  if (!tpl.supported) throw new InboxError(400, 'template', 'Esa plantilla necesita imagen o botones con variables; todavía no se puede enviar desde la bandeja.')
+  if (t.params.length !== tpl.variables || t.params.some((p) => !p.trim())) throw new InboxError(400, 'params', `La plantilla necesita ${tpl.variables} dato(s); llénalos todos.`)
+  const content = tpl.body.replace(/\{\{\s*(\d+)\s*\}\}/g, (_m, n: string) => t.params[Number(n) - 1] ?? '')
+  const m = await inbox.insert({ conversation_id: convId, role: 'assistant', sender: 'human', author_id: user.id, kind: 'text', content: `📋 ${content}` })
+  try {
+    await sendTemplateToContact(env, tenantId, conv, m.id, t)
+  } catch (e) {
+    await inboxEvent(env, tenantId, 'message.created', { conversation_id: convId, message_id: m.id })
+    throw new InboxError(502, 'send_failed', e instanceof Error ? e.message : 'No se pudo enviar la plantilla.')
+  }
+  await event(inbox, convId, `Plantilla «${t.name}» (${t.language}) enviada.`, user.id)
+  await inbox.markFirstHumanResponse(convId)
+  await inboxEvent(env, tenantId, 'message.created', { conversation_id: convId, message_id: m.id })
+  return m
+}
+
+/** Plantillas aprobadas del número de la conversación */
+export async function waTemplatesFor(env: Env, tenantId: string, conv: InboxConversation & WaConvRef) {
+  if (!isWhatsApp(conv)) return []
+  const ch = await new ChannelRepo(env.DB, tenantId).get(conv.channel_id!)
+  if (!ch) return []
+  return connectorFor(ch.provider)!.templates(env, await channelCreds(env, ch))
 }
 
 /** Nota interna: nunca llega al visitante */

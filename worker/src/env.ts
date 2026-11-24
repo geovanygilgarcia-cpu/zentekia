@@ -25,6 +25,11 @@ export interface Env {
   INBOX_HUB?: DurableObjectNamespace
   /** Bandeja omnicanal: un Durable Object por conversación (WebSocket del visitante y alarma de espera) */
   CONVERSATION_DO?: DurableObjectNamespace
+  /** WhatsApp · 360dialog: secreto de plataforma para validar x-360dialog-signature (opcional) */
+  D360_PLATFORM_SECRET?: string
+  /** WhatsApp · solo pruebas locales: URL base de los BSP simulados */
+  WA_360_BASE?: string
+  WA_YCLOUD_BASE?: string
 }
 
 /** owner y editor administran; supervisor y agent trabajan en la bandeja */
